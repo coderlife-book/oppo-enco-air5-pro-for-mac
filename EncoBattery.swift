@@ -416,7 +416,7 @@ private struct LevelRow: View {
     }
 }
 
-// MARK: - 分段选择（系统控件）
+// MARK: - 分段选择（样式对齐系统分段控件，选中指示带滑动动画）
 
 private struct SegmentedRow<Value: Hashable>: View {
     let label: String
@@ -425,19 +425,49 @@ private struct SegmentedRow<Value: Hashable>: View {
     let disabled: Bool
     let action: (Value) -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var indicator
+
     var body: some View {
-        Picker(label, selection: Binding(
-            get: { selection },
-            set: { if let value = $0 { action(value) } }
-        )) {
+        HStack(spacing: 1) {
             ForEach(options, id: \.value) { option in
-                Text(option.label).tag(Optional(option.value))
+                segment(option)
             }
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .disabled(disabled)
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(.quaternary)
+        )
+        .opacity(disabled ? 0.45 : 1)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: selection)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
+        .accessibilityValue(selection.flatMap { selected in
+            options.first { $0.value == selected }?.label
+        } ?? "未选择")
+    }
+
+    @ViewBuilder private func segment(_ option: (value: Value, label: String)) -> some View {
+        let selected = selection == option.value
+        Text(option.label)
+            .font(.subheadline.weight(selected ? .medium : .regular))
+            .foregroundStyle(selected ? Color.white : Color.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
+            .frame(minHeight: 18)
+            .background {
+                if selected {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.accentColor)
+                        .matchedGeometryEffect(id: "selected", in: indicator)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard !disabled else { return }
+                action(option.value)
+            }
     }
 }
 
@@ -514,23 +544,22 @@ private struct BatteryPopover: View {
     private var soundSection: some View {
         VStack(spacing: 10) {
             Button {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) {
-                    soundExpanded.toggle()
-                }
+                soundExpanded.toggle()
             } label: {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     Image(systemName: "waveform")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .accessibilityHidden(true)
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("声音设置")
-                            .font(.subheadline)
-                        Text(soundSummary)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text("声音设置")
+                        .font(.subheadline)
+
+                    Text(soundSummary)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
 
                     Spacer(minLength: 8)
 
@@ -548,7 +577,6 @@ private struct BatteryPopover: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("声音设置，\(soundSummary)")
-            .accessibilityAddTraits(soundExpanded ? [] : .isButton)
             .accessibilityHint(soundExpanded ? "折叠" : "展开")
 
             if soundExpanded {
@@ -556,10 +584,8 @@ private struct BatteryPopover: View {
                     noiseSection
                     eqSection
                 }
-                .transition(.opacity)
             }
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: soundExpanded)
     }
 
     private var soundSummary: String {
@@ -795,6 +821,9 @@ final class EncoLink {
     private var nextOpenAt = Date.distantPast
 
     private var snapshot = Snapshot()
+    /// 左右耳放置状态（id 1/2 → 是否在盒内）。absent = 未知。
+    /// 耳机只有进盒才可能充电；佩戴中上报/回包里的充电位不可信，用它做门禁。
+    private var sideInCase: [UInt8: Bool] = [:]
 
     init(keepaliveInterval: TimeInterval) {
         self.keepaliveInterval = keepaliveInterval
@@ -1112,8 +1141,12 @@ final class EncoLink {
                 guard base + 1 < payload.count else { break }
                 let raw = Int(payload[base + 1])
                 let level = raw & 0x7f
-                let charging = raw & 0x80 != 0
-                switch payload[base] {
+                var charging = raw & 0x80 != 0
+                let slot = payload[base]
+                if slot == 1 || slot == 2 {
+                    if sideInCase[slot] == false { charging = false } // 佩戴中充电位不可信
+                }
+                switch slot {
                 case 1: left = level; leftCharging = charging
                 case 2: right = level; rightCharging = charging
                 case 3: caseLevel = level; caseCharging = charging
@@ -1133,8 +1166,12 @@ final class EncoLink {
         case 0x0402: // 主动状态上报：电量 0 = 休眠，语义和查询回包不同
             let report = StatusReport.parse(payload)
             for entry in report.battery {
-                let charging = entry.raw & 0x80 != 0
+                var charging = entry.raw & 0x80 != 0
                 let level: Int? = entry.raw == 0 ? nil : Int(entry.raw & 0x7f)
+                if entry.id == 1 || entry.id == 2 {
+                    // 佩戴中的耳机不可能在充电：已知盒外时忽略充电位
+                    if sideInCase[entry.id] == false { charging = false }
+                }
                 switch entry.id {
                 case 1:
                     snapshot.left = level
@@ -1149,6 +1186,12 @@ final class EncoLink {
                 }
             }
             for entry in report.placement where entry.id == 1 || entry.id == 2 {
+                switch entry.value {
+                case 0x04: sideInCase[entry.id] = true // 盒内
+                case 0x05: sideInCase[entry.id] = false // 盒外（佩戴）→ 充电态立即作废
+                    if entry.id == 1 { snapshot.leftCharging = false } else { snapshot.rightCharging = false }
+                default: sideInCase.removeValue(forKey: entry.id) // 过渡态不可知
+                }
                 // 进仓且没在充电：旧电量作废，等重新上报
                 guard entry.value == 0x04 else { continue }
                 let charging = entry.id == 1 ? snapshot.leftCharging : snapshot.rightCharging
