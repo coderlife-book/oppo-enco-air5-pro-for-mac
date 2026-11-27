@@ -416,35 +416,28 @@ private struct LevelRow: View {
     }
 }
 
-// MARK: - 选择按钮
+// MARK: - 分段选择（系统控件）
 
-private struct PillRow<Value: Hashable>: View {
+private struct SegmentedRow<Value: Hashable>: View {
+    let label: String
     let options: [(value: Value, label: String)]
     let selection: Value?
     let disabled: Bool
     let action: (Value) -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
+        Picker(label, selection: Binding(
+            get: { selection },
+            set: { if let value = $0 { action(value) } }
+        )) {
             ForEach(options, id: \.value) { option in
-                let selected = selection == option.value
-                Button {
-                    action(option.value)
-                } label: {
-                    Text(option.label)
-                        .font(.subheadline.weight(selected ? .semibold : .regular))
-                        .frame(maxWidth: .infinity, minHeight: 24)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(selected ? Color.accentColor : Color.primary.opacity(0.75))
-                .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(selected ? AnyShapeStyle(Color.accentColor.opacity(0.16)) : AnyShapeStyle(.quaternary))
-                )
-                .disabled(disabled)
+                Text(option.label).tag(Optional(option.value))
             }
         }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .disabled(disabled)
+        .accessibilityLabel(label)
     }
 }
 
@@ -524,7 +517,8 @@ private struct BatteryPopover: View {
                     .foregroundStyle(.secondary)
                 if model.pendingNoise { ProgressView().controlSize(.mini) }
             }
-            PillRow(
+            SegmentedRow(
+                label: "降噪模式",
                 options: [NoiseMode.noise, .transparency, .off].map { ($0, $0.label) },
                 selection: model.noiseMode,
                 disabled: controlsDisabled || model.pendingNoise
@@ -532,7 +526,8 @@ private struct BatteryPopover: View {
                 onSetNoise?(mode, nil)
             }
             if model.noiseMode == .noise {
-                PillRow(
+                SegmentedRow(
+                    label: "降噪强度",
                     options: ANCLevel.allCases.map { ($0, $0.label) },
                     selection: model.noiseLevel,
                     disabled: controlsDisabled || model.pendingNoise
@@ -551,7 +546,8 @@ private struct BatteryPopover: View {
                     .foregroundStyle(.secondary)
                 if model.pendingEQ { ProgressView().controlSize(.mini) }
             }
-            PillRow(
+            SegmentedRow(
+                label: "音效预设",
                 options: [EQPreset.original, .vocals, .bass].map { ($0, $0.label) },
                 selection: model.eq,
                 disabled: controlsDisabled || model.pendingEQ
@@ -562,51 +558,42 @@ private struct BatteryPopover: View {
     }
 
     private var statusRow: some View {
-        VStack(spacing: 4) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(model.online ? (model.anyCharging ? Color.green : Color.secondary) : Color.secondary)
-                    .frame(width: 6, height: 6)
-                    .accessibilityHidden(true)
+        HStack(spacing: 8) {
+            Text(model.statusTitle)
+                .font(.subheadline)
+                .foregroundStyle(model.online ? Color.primary : Color.secondary)
 
-                Text(model.statusTitle)
-                    .font(.subheadline)
-                    .foregroundStyle(model.online ? Color.primary : Color.secondary)
-            }
-            HStack {
-                Spacer(minLength: 0)
-                if let lastUpdate = model.lastUpdate {
-                    Group {
-                        if model.online {
-                            Text("刚刚更新")
-                        } else {
-                            TimelineView(.periodic(from: lastUpdate, by: 60)) { context in
-                                let age = context.date.timeIntervalSince(lastUpdate)
-                                let updated = age < 60
-                                    ? "不到 1 分钟前"
-                                    : Self.relativeTime.localizedString(for: lastUpdate, relativeTo: context.date)
-                                Text(updated)
-                            }
+            Spacer(minLength: 8)
+
+            if let lastUpdate = model.lastUpdate {
+                Group {
+                    if model.online {
+                        Text("刚刚更新")
+                    } else {
+                        TimelineView(.periodic(from: lastUpdate, by: 60)) { context in
+                            let age = context.date.timeIntervalSince(lastUpdate)
+                            let updated = age < 60
+                                ? "不到 1 分钟前"
+                                : Self.relativeTime.localizedString(for: lastUpdate, relativeTo: context.date)
+                            Text(updated)
                         }
                     }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 }
-
-                Spacer(minLength: 0)
-
-                Button {
-                    onOpenSettings?()
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("设置")
-                .accessibilityLabel("设置")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
+
+            Button {
+                onOpenSettings?()
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("设置")
+            .accessibilityLabel("设置")
         }
     }
 
