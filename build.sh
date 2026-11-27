@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="EncoBattery.app"
-VERSION="1.0.0"
+VERSION="1.1.0"
 BUILD="1"
 ARCHS=(arm64 x86_64)
 

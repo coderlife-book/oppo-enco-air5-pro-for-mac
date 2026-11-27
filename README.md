@@ -24,7 +24,7 @@
 
 ## 安装
 
-**给朋友（双击安装）**：下载 [Releases](https://github.com/coderlife-book/oppo-enco-battery/releases/latest) 里的 `EncoBattery-1.0.0.dmg` → 双击打开 → 把 `EncoBattery.app` 拖进「应用程序」→ 首次打开被 Gatekeeper 拦下时，右键「打开」再点「打开」，或到「系统设置 → 隐私与安全性」点「仍要打开」。
+**给朋友（双击安装）**：下载 [Releases](https://github.com/coderlife-book/oppo-enco-battery/releases/latest) 里的 `EncoBattery-1.1.0.dmg` → 双击打开 → 把 `EncoBattery.app` 拖进「应用程序」→ 首次打开被 Gatekeeper 拦下时，右键「打开」再点「打开」，或到「系统设置 → 隐私与安全性」点「仍要打开」。
 
 > 没有 $99/年的 Apple 开发者证书，所以是 ad-hoc 签名、未公证，第一次必须手动放行一次。仅此一次。
 
@@ -33,7 +33,7 @@
 ```bash
 ./build.sh            # 通用二进制（Apple Silicon + Intel），产出 EncoBattery.app
 open EncoBattery.app
-./make_dmg.sh         # 需要分发包时：dist/EncoBattery-1.0.0.dmg
+./make_dmg.sh         # 需要分发包时：dist/EncoBattery-1.1.0.dmg
 ```
 
 要求 macOS 13+，耳机需要先在这台 Mac 上配对并连接过。
@@ -107,7 +107,7 @@ rx aa 0f 00 00 06 81 03 08 00 00 03 01 e4 02 e4 03 5a
 
 macOS reports a single aggregate battery level for Bluetooth earbuds. This tiny menu bar app talks to the earbuds over their own private SPP/RFCOMM channel (the same one HeyMelody uses) and asks for the three battery levels separately, refreshing every 30 seconds.
 
-Download `EncoBattery-1.0.0.dmg` from [Releases](https://github.com/coderlife-book/oppo-enco-battery/releases/latest), drag the app to *Applications*, then right-click → *Open* the first time (ad-hoc signed, not notarized — Gatekeeper will require one manual approval).
+Download `EncoBattery-1.1.0.dmg` from [Releases](https://github.com/coderlife-book/oppo-enco-battery/releases/latest), drag the app to *Applications*, then right-click → *Open* the first time (ad-hoc signed, not notarized — Gatekeeper will require one manual approval).
 
 Keywords: OPPO Enco Air5 Pro battery on macOS, earbuds menu bar battery, charging case battery level, HeyMelody alternative for Mac, realme / OnePlus TWS battery, reverse-engineered OPPO SPP protocol. Requires macOS 13+, universal binary (Apple Silicon + Intel).
 
