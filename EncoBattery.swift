@@ -436,6 +436,7 @@ private struct SegmentedRow<Value: Hashable>: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
+        .frame(maxWidth: .infinity)
         .disabled(disabled)
         .accessibilityLabel(label)
     }
@@ -459,7 +460,7 @@ private struct BatteryPopover: View {
     private var controlsDisabled: Bool { !model.online }
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
             header
             VStack(spacing: 9) {
                 LevelRow(badge: "L", title: "左耳", level: model.left, charging: model.leftCharging)
@@ -510,10 +511,10 @@ private struct BatteryPopover: View {
     }
 
     private var noiseSection: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Text("降噪")
-                    .font(.caption.weight(.medium))
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 if model.pendingNoise { ProgressView().controlSize(.mini) }
             }
@@ -525,24 +526,23 @@ private struct BatteryPopover: View {
             ) { mode in
                 onSetNoise?(mode, nil)
             }
-            if model.noiseMode == .noise {
-                SegmentedRow(
-                    label: "降噪强度",
-                    options: ANCLevel.allCases.map { ($0, $0.label) },
-                    selection: model.noiseLevel,
-                    disabled: controlsDisabled || model.pendingNoise
-                ) { level in
-                    onSetNoise?(.noise, level)
-                }
+            SegmentedRow(
+                label: "降噪强度",
+                options: ANCLevel.allCases.map { ($0, $0.label) },
+                selection: model.noiseLevel,
+                disabled: controlsDisabled || model.pendingNoise || model.noiseMode != .noise
+            ) { level in
+                onSetNoise?(.noise, level)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var eqSection: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Text("音效")
-                    .font(.caption.weight(.medium))
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 if model.pendingEQ { ProgressView().controlSize(.mini) }
             }
@@ -555,6 +555,7 @@ private struct BatteryPopover: View {
                 onSetEQ?(preset)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var statusRow: some View {
