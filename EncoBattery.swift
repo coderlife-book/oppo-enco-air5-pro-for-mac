@@ -450,24 +450,27 @@ private struct SegmentedRow<Value: Hashable>: View {
 
     @ViewBuilder private func segment(_ option: (value: Value, label: String)) -> some View {
         let selected = selection == option.value
-        Text(option.label)
-            .font(.subheadline.weight(selected ? .medium : .regular))
-            .foregroundStyle(selected ? Color.white : Color.secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 3)
-            .frame(minHeight: 18)
-            .background {
-                if selected {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(Color.accentColor)
-                        .matchedGeometryEffect(id: "selected", in: indicator)
+        Button {
+            guard !disabled else { return }
+            action(option.value)
+        } label: {
+            Text(option.label)
+                .font(.subheadline.weight(selected ? .medium : .regular))
+                .foregroundStyle(selected ? Color.white : Color.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+                .frame(minHeight: 18)
+                .background {
+                    if selected {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.accentColor)
+                            .matchedGeometryEffect(id: "selected", in: indicator)
+                    }
                 }
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                guard !disabled else { return }
-                action(option.value)
-            }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
     }
 }
 
@@ -544,7 +547,9 @@ private struct BatteryPopover: View {
     private var soundSection: some View {
         VStack(spacing: 10) {
             Button {
-                soundExpanded.toggle()
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                    soundExpanded.toggle()
+                }
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "waveform")
@@ -584,6 +589,7 @@ private struct BatteryPopover: View {
                     noiseSection
                     eqSection
                 }
+                .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
             }
         }
     }
