@@ -436,7 +436,6 @@ private struct SegmentedRow<Value: Hashable>: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
-        .frame(maxWidth: .infinity)
         .disabled(disabled)
         .accessibilityLabel(label)
     }
@@ -446,6 +445,7 @@ private struct SegmentedRow<Value: Hashable>: View {
 
 private struct BatteryPopover: View {
     @ObservedObject var model: BatteryModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var onSetNoise: ((NoiseMode, ANCLevel?) -> Void)? = nil
     var onSetEQ: ((EQPreset) -> Void)? = nil
     var onOpenSettings: (() -> Void)? = nil
@@ -469,6 +469,7 @@ private struct BatteryPopover: View {
             }
             Divider()
             noiseSection
+            Divider()
             eqSection
             Divider()
             statusRow
@@ -511,41 +512,36 @@ private struct BatteryPopover: View {
     }
 
     private var noiseSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text("降噪")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                if model.pendingNoise { ProgressView().controlSize(.mini) }
+        VStack(spacing: 10) {
+            controlRow(label: "降噪", pending: model.pendingNoise) {
+                SegmentedRow(
+                    label: "降噪模式",
+                    options: [NoiseMode.noise, .transparency, .off].map { ($0, $0.label) },
+                    selection: model.noiseMode,
+                    disabled: controlsDisabled || model.pendingNoise
+                ) { mode in
+                    onSetNoise?(mode, nil)
+                }
             }
-            SegmentedRow(
-                label: "降噪模式",
-                options: [NoiseMode.noise, .transparency, .off].map { ($0, $0.label) },
-                selection: model.noiseMode,
-                disabled: controlsDisabled || model.pendingNoise
-            ) { mode in
-                onSetNoise?(mode, nil)
-            }
-            SegmentedRow(
-                label: "降噪强度",
-                options: ANCLevel.allCases.map { ($0, $0.label) },
-                selection: model.noiseLevel,
-                disabled: controlsDisabled || model.pendingNoise || model.noiseMode != .noise
-            ) { level in
-                onSetNoise?(.noise, level)
+            if model.noiseMode == .noise {
+                controlRow(label: "强度") {
+                    SegmentedRow(
+                        label: "降噪强度",
+                        options: ANCLevel.allCases.map { ($0, $0.label) },
+                        selection: model.noiseLevel,
+                        disabled: controlsDisabled || model.pendingNoise
+                    ) { level in
+                        onSetNoise?(.noise, level)
+                    }
+                }
+                .transition(.opacity)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: model.noiseMode == .noise)
     }
 
     private var eqSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text("音效")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                if model.pendingEQ { ProgressView().controlSize(.mini) }
-            }
+        controlRow(label: "音效", pending: model.pendingEQ) {
             SegmentedRow(
                 label: "音效预设",
                 options: [EQPreset.original, .vocals, .bass].map { ($0, $0.label) },
@@ -555,7 +551,18 @@ private struct BatteryPopover: View {
                 onSetEQ?(preset)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func controlRow<Control: View>(label: String, pending: Bool = false, @ViewBuilder control: () -> Control) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 52, alignment: .leading)
+            if pending { ProgressView().controlSize(.mini) }
+            Spacer(minLength: 12)
+            control()
+        }
     }
 
     private var statusRow: some View {
