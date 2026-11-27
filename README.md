@@ -9,7 +9,10 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/coderlife-book/oppo-enco-battery?color=orange)](https://github.com/coderlife-book/oppo-enco-battery/releases/latest)
 
-<img src="screenshots/charging.png" width="640" alt="EncoBattery 弹窗：菜单栏图标 + 左右耳 + 充电仓电量">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="screenshots/charging-dark.png">
+  <img src="screenshots/charging.png" width="640" alt="EncoBattery 弹窗：菜单栏图标 + 左右耳 + 充电仓电量">
+</picture>
 
 ## 截图
 
@@ -17,7 +20,7 @@
 
 | 耳机在仓里：左右耳 + 仓都在充电 | 耳机戴在耳朵上：只有左右耳 |
 | --- | --- |
-| ![充电中](screenshots/charging.png) | ![只有左右耳](screenshots/buds-only.png) |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="screenshots/charging-dark.png"><img src="screenshots/charging.png" width="330" alt="充电中"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="screenshots/buds-only-dark.png"><img src="screenshots/buds-only.png" width="330" alt="只有左右耳"></picture> |
 
 左键点菜单栏图标弹出卡片，右键是「刷新电量 / 退出 EncoBattery」。菜单栏只显示一个数字（取左右耳里较低的那只），低于 20% 变橙、低于 10% 变红；耳机没连接时图标置灰、不显示数字。
 
