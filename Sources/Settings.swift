@@ -47,6 +47,7 @@ final class SettingsStore: ObservableObject {
 // MARK: - 设置页
 
 struct SettingsPage: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var settings: SettingsStore
     @ObservedObject var model: BatteryModel
 
@@ -78,7 +79,13 @@ struct SettingsPage: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .scrollIndicators(.hidden)
         .frame(width: 360, height: 372)
+        .background {
+            Color(nsColor: .windowBackgroundColor)
+                .overlay(Color.primary.opacity(colorScheme == .light ? 0.08 : 0))
+                .ignoresSafeArea()
+        }
     }
 }

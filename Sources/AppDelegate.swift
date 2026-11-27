@@ -276,7 +276,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsPage(settings: settings, model: model)))
         window.title = "OPPO Enco Air5 Pro 设置"
-        window.styleMask = [.titled, .closable]
+        window.styleMask = [.titled, .closable, .fullSizeContentView]
+        window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
         window.center()
         window.makeKeyAndOrderFront(nil)

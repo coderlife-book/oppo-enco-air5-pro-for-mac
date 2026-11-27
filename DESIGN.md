@@ -479,7 +479,7 @@
 - **UI 是回显驱动的**：所有降噪/音效切换只渲染耳机回发的状态，不做乐观更新；等待回显时显示 ProgressView 并禁用对应分段控件。
 - **小窗口禁止经典滚动条**：窗口高度贴合内容；固定高度时配 `.scrollIndicators(.hidden)`（设置窗口固定 360×372）。
 - **离屏渲染的 Form 必须固定 frame**：`ImageRenderer` 下 grouped Form 自然高度会塌缩（实测塌成 122pt），不能依赖 fittingSize。
-- **窗口样式**：设置窗口 `[.titled, .closable]` 不可缩放； popover 用系统 NSPopover，不自绘背景。
+- **窗口样式**：设置窗口保留原生标题栏并固定尺寸，标题栏与内容共用实色背景，浅色系统背景略微压暗；菜单栏浮层使用系统 NSPopover。
 - 动画：分段选中滑块 150ms；展开/收起用手动逐帧 reveal 驱动 200ms easeInOut（NSPopover 窗口尺寸没有原生动画，靠 SwiftUI 逐帧重排让宿主窗口跟着动），全部走 `reduceMotion` 退化瞬切。
 - 颜色只用语义色；电量状态色：充电 `systemGreen`、≤10% `systemRed`、≤20% `systemOrange`。
 - UI 文案极简：窗口标题栏已有的信息不在正文重复；不确定的状态如实显示「未知」。
