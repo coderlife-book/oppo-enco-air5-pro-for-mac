@@ -13,11 +13,13 @@
 
 ## 安装
 
-1. 将 OPPO Enco Air5 Pro 与 Mac 配对并连接。
-2. 打开 DMG，将 `EncoBattery.app` 拖入「应用程序」。升级前请退出旧版。
-3. 打开应用后，点击菜单栏的耳机图标。切换降噪时请佩戴耳机。
+1. 打开下载的 DMG，把 `EncoBattery.app` 拖入「应用程序」。升级前先退出旧版。
+2. 尝试打开应用。安装包未经 Apple 公证，若提示无法验证，确认从本仓库下载后，前往「系统设置 → 隐私与安全性 → 安全性」，点击「仍要打开」。
+3. 再次出现提示时，点击「打开」确认。配对并连接耳机后，点击菜单栏的耳机图标。切换降噪时请佩戴耳机。
 
-安装包采用临时签名，未经 Apple 公证。如果首次打开被拦截，请核对下载来源，再按 Apple 的说明操作。[在 Mac 上安全打开 App](https://support.apple.com/zh-cn/102445)
+<img src="assets/macos-open-anyway.png" width="560" alt="macOS 隐私与安全性中的「仍要打开」按钮">
+
+参考 [Apple 支持 · 在 Mac 上安全地打开 App](https://support.apple.com/zh-cn/102445)。
 
 ## 从源码构建
 
