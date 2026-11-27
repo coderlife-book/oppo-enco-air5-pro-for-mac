@@ -646,7 +646,8 @@ struct SettingsPage: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 360, height: 320)
+        .scrollIndicators(.hidden)
+        .frame(width: 360, height: 372)
     }
 }
 
