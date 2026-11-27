@@ -6,13 +6,11 @@
 
 ## 截图
 
-| 电量概览 | 声音设置 | 设置窗口 |
+| 场景 | 浅色 | 深色 |
 | --- | --- | --- |
-| ![浅色电量概览](assets/battery-overview-light.png) | ![浅色声音设置](assets/sound-controls-light.png) | ![浅色设置窗口](assets/settings-window-light.png) |
-
-| 深色声音设置 | 深色设置窗口 |
-| --- | --- |
-| <img src="assets/sound-controls-dark.png" alt="深色声音设置" width="300"> | <img src="assets/settings-window-dark.png" alt="深色设置窗口" width="300"> |
+| 电量概览 | ![浅色电量概览](assets/battery-overview-light.png) | ![深色电量概览](assets/battery-overview-dark.png) |
+| 声音设置 | ![浅色声音设置](assets/sound-controls-light.png) | ![深色声音设置](assets/sound-controls-dark.png) |
+| 设置窗口 | ![浅色设置窗口](assets/settings-window-light.png) | ![深色设置窗口](assets/settings-window-dark.png) |
 
 ## 安装
 
