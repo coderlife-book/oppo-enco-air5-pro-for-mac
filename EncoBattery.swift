@@ -318,18 +318,38 @@ final class SettingsStore: ObservableObject {
     @Published var menuBarIconVisible: Bool {
         didSet { UserDefaults.standard.set(menuBarIconVisible, forKey: Self.kMenuBarIconVisible) }
     }
-    /// 菜单栏分耳显示：左82 右80 仓96；没有数据的仓不占位置
-    @Published var menuBarDetailed: Bool {
-        didSet { UserDefaults.standard.set(menuBarDetailed, forKey: Self.kMenuBarDetailed) }
+    /// 菜单栏分耳显示：三格各自开关，全关就是单数字模式
+    @Published var showLeftInMenuBar: Bool {
+        didSet { UserDefaults.standard.set(showLeftInMenuBar, forKey: Self.kMenuBarShowLeft) }
+    }
+    @Published var showRightInMenuBar: Bool {
+        didSet { UserDefaults.standard.set(showRightInMenuBar, forKey: Self.kMenuBarShowRight) }
+    }
+    @Published var showCaseInMenuBar: Bool {
+        didSet { UserDefaults.standard.set(showCaseInMenuBar, forKey: Self.kMenuBarShowCase) }
     }
 
     private static let kMenuBarIconVisible = "EBMenuBarIconVisible"
-    private static let kMenuBarDetailed = "EBMenuBarDetailed"
+    private static let kMenuBarShowLeft = "EBMenuBarShowLeft"
+    private static let kMenuBarShowRight = "EBMenuBarShowRight"
+    private static let kMenuBarShowCase = "EBMenuBarShowCase"
 
     init() {
         let d = UserDefaults.standard
         menuBarIconVisible = d.object(forKey: Self.kMenuBarIconVisible) as? Bool ?? true
-        menuBarDetailed = d.object(forKey: Self.kMenuBarDetailed) as? Bool ?? false
+        showLeftInMenuBar = d.object(forKey: Self.kMenuBarShowLeft) as? Bool ?? false
+        showRightInMenuBar = d.object(forKey: Self.kMenuBarShowRight) as? Bool ?? false
+        showCaseInMenuBar = d.object(forKey: Self.kMenuBarShowCase) as? Bool ?? false
+
+        // 2.1.0 早期的总开关迁移成三格
+        if let legacy = d.object(forKey: "EBMenuBarDetailed") as? Bool {
+            if legacy && !showLeftInMenuBar && !showRightInMenuBar && !showCaseInMenuBar {
+                showLeftInMenuBar = true
+                showRightInMenuBar = true
+                showCaseInMenuBar = true
+            }
+            d.removeObject(forKey: "EBMenuBarDetailed")
+        }
     }
 }
 
@@ -601,72 +621,32 @@ struct SettingsPage: View {
     private var versionText: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
-        return version.isEmpty ? "EncoBattery" : "EncoBattery v\(version) (\(build))"
+        return version.isEmpty ? "EncoBattery" : "\(version) (\(build))"
     }
 
     private var firmwareText: String {
         if let firmware = model.firmware { return firmware }
-        return model.online ? "正在读取…" : "连接耳机后显示"
+        return model.online ? "正在读取…" : "未连接"
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 8) {
-                Image(systemName: "gearshape.fill")
-                    .foregroundStyle(.secondary)
-                Text("设置")
-                    .font(.headline)
-                Spacer()
+        Form {
+            Section("菜单栏") {
+                Toggle("显示图标", isOn: $settings.menuBarIconVisible)
+                Toggle("左耳电量", isOn: $settings.showLeftInMenuBar)
+                    .disabled(!settings.menuBarIconVisible)
+                Toggle("右耳电量", isOn: $settings.showRightInMenuBar)
+                    .disabled(!settings.menuBarIconVisible)
+                Toggle("充电仓电量", isOn: $settings.showCaseInMenuBar)
+                    .disabled(!settings.menuBarIconVisible)
             }
-            .accessibilityElement(children: .combine)
-
-            Divider()
-
-            Toggle(isOn: $settings.menuBarIconVisible) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("在菜单栏显示图标")
-                    Text("关掉后可以从 Dock 里的 EncoBattery 图标回到这里")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Divider()
-
-            Toggle(isOn: $settings.menuBarDetailed) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("菜单栏分耳显示电量")
-                    Text("显示成「L82 R80 仓96」，没有数据的仓不占位置；绿色表示充电中")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .disabled(!settings.menuBarIconVisible)
-            .opacity(settings.menuBarIconVisible ? 1 : 0.45)
-
-            Divider()
-
-            HStack {
-                Text("固件版本")
-                    .font(.subheadline)
-                Spacer()
-                Text(firmwareText)
-                    .font(.subheadline)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            .accessibilityElement(children: .combine)
-
-            HStack {
-                Spacer()
-                Text(versionText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Section("关于") {
+                LabeledContent("固件版本", value: firmwareText)
+                LabeledContent("版本", value: versionText)
             }
         }
-        .toggleStyle(.switch)
-        .padding(18)
-        .frame(width: 344)
+        .formStyle(.grouped)
+        .frame(width: 360, height: 320)
     }
 }
 
@@ -1375,13 +1355,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.applyMenuBarVisibility(visible)
             }
             .store(in: &cancellables)
-        settings.$menuBarDetailed
-            .dropFirst()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.updateStatusItem()
-            }
-            .store(in: &cancellables)
+        for publisher in [
+            settings.$showLeftInMenuBar,
+            settings.$showRightInMenuBar,
+            settings.$showCaseInMenuBar,
+        ] {
+            publisher
+                .dropFirst()
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in
+                    self?.updateStatusItem()
+                }
+                .store(in: &cancellables)
+        }
         applyMenuBarVisibility(settings.menuBarIconVisible)
         debugLog("started")
     }
@@ -1409,13 +1395,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let firmware = model.firmware { tip += " · 固件 \(firmware)" }
         button.toolTip = tip
 
-        // 分耳模式：「L82 R80 仓96」，没有数据的槽不出现
-        if settings.menuBarDetailed {
-            let detailed = detailedAttributedTitle()
-            if detailed.length > 0 {
-                button.attributedTitle = detailed
-                return
-            }
+        // 分耳模式：「L82 R80 仓96」，三格各自开关，没有数据的槽不出现
+        let detailed = detailedAttributedTitle()
+        if detailed.length > 0 {
+            button.attributedTitle = detailed
+            return
         }
 
         let color: NSColor = level <= 10 ? .systemRed : (level <= 20 ? .systemOrange : .labelColor)
@@ -1440,13 +1424,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .labelColor
         }
 
-        let slots: [(String, Int?, Bool)] = [
-            ("L", model.left, model.leftCharging),
-            ("R", model.right, model.rightCharging),
-            ("仓", model.caseLevel, model.caseCharging),
+        let slots: [(String, Int?, Bool, Bool)] = [
+            ("L", model.left, model.leftCharging, settings.showLeftInMenuBar),
+            ("R", model.right, model.rightCharging, settings.showRightInMenuBar),
+            ("仓", model.caseLevel, model.caseCharging, settings.showCaseInMenuBar),
         ]
         let segments = slots.compactMap { slot -> (String, Int, Bool)? in
-            guard let level = slot.1 else { return nil }
+            guard slot.3, let level = slot.1 else { return nil }
             return (slot.0, level, slot.2)
         }
         guard !segments.isEmpty else { return NSAttributedString() }
