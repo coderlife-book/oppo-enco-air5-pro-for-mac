@@ -5,8 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="EncoBattery.app"
-VERSION="1.1.0"
-BUILD="1"
+VERSION="2.0.0"
+BUILD="2"
 ARCHS=(arm64 x86_64)
 
 mkdir -p build
@@ -41,7 +41,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key>  <string>13.0</string>
     <key>LSUIElement</key>             <true/>
     <key>NSHighResolutionCapable</key> <true/>
-    <key>NSBluetoothAlwaysUsageDescription</key> <string>读取已配对耳机的电量</string>
+    <key>NSBluetoothAlwaysUsageDescription</key> <string>读取已配对耳机的电量，切换降噪与音效</string>
 </dict>
 </plist>
 PLIST

@@ -1,17 +1,32 @@
-// EncoBattery — 菜单栏显示 OPPO Enco Air5 Pro 左右耳 + 充电仓电量
+// EncoBattery — OPPO Enco Air5 Pro 菜单栏助手：电量 + 降噪 + 音效 + 固件版本
 //
-// 只读：通过经典蓝牙 SPP（RFCOMM channel 5，服务 UUID 0000079A-D102-11E1-9B23-00025B00A5A5）
-// 向耳机发「查询电量」指令，不写任何设置。
+// v2.0 起改为长连接会话：打开一次 RFCOMM 通道不关闭，靠耳机主动上报（0x0402）
+// 实时刷新电量/降噪状态，手机端改设置这边会同步跟着变。
 //
-// 协议（OPOv1 / HeyMelody 家族）：
-//   帧: AA <len> 00 00 <cmd LE16> <seq> <paylen LE16> <payload>
-//       len = 帧总长 - 2
-//   0x0106 查电量 → 0x8106: payload = status(0) + count + count×(设备字节, 电量字节)
-//       设备字节 1=左 2=右 3=仓；电量低 7 位为百分比，bit7 = 充电中
-//   0x0103 产品 id → 0x8103: payload = status + 3 字节 LE（Enco Air5 Pro = 0x06C410）
-//
-// 注意：进程内第一次 openRFCOMMChannelSync 必定 3.1 秒超时失败（RFCOMM mux 建立
-// 被算进这次调用），紧接着重试即成功——所以下面有「预热 + 重试」。
+// 协议速查（实测自 Air5 Pro，与 HeyMelody/欢律 同一控制通道）：
+//   传输：经典蓝牙 SPP，服务 UUID 0000079A-D102-11E1-9B23-00025B00A5A5
+//         RFCOMM 通道号从 SDP record 里取，取不到再退回 5
+//   帧：  AA <len:7bit变长> 00 00 <opcode大端> <seq> <paylen小端> <payload>
+//         len = payload 长度 + 7；无校验和
+//   opcode（大端字节序）：
+//         00 01  hello（建立会话）
+//         06 01 → 06 81  查电量 / 回包
+//         05 01 → 05 81  查设备信息（固件版本）
+//         0f 01 → 0f 81  查均衡器 / 回包；04 05 均衡器主动上报
+//         04 04          写降噪模式（payload 01 01 <value>）
+//         06 04          写均衡器预设（payload 单字节）
+//         04 02          主动状态上报，payload 按「块」组织
+//   04 02 块结构：<type> <count> <条目...>
+//         type 01 电量：条目 = (id, 值)；id 1=左 2=右 3=仓；值 bit7=充电，低 7 位百分比
+//                       上报里 0 = 该槽休眠（未知）；查询回包里 0 = 真 0%
+//         type 02 放置：条目 = (id, 值)；04=盒内 05=盒外；进仓且没在充电就清掉该耳旧电量
+//         type 03 降噪：count 必须 1，条目 = (01, 值 u16 小端)
+//                       0x0008=关 0x0100=通透 0x0010=深度 0x0020=中度 0x0040=轻度 0x0080=智能
+//                       count != 1 的伴随块（智能模式"当前强度"）直接按长度跳过
+//   写命令纪律：只发一次、绝不重试；发完 3 秒内等耳机回报确认，没确认 UI 就报「未确认」，
+//         不乐观更新。查询按序匹配，串行发送，间隔 0.2s。
+//   坑：进程内第一次 openRFCOMMChannelSync 必定 3.1 秒超时（RFCOMM mux 建立被算进这次
+//         调用），紧接着重试即成功——所以打开流程带预热重试。
 //
 // 编译：./build.sh
 
@@ -19,54 +34,267 @@ import Cocoa
 import IOBluetooth
 import SwiftUI
 
-let kServiceUUID = "0000079a-d102-11e1-9b23-00025b00a5a5"
-let kChannelID: UInt8 = 5
-let kOfflineAfter: TimeInterval = 20
+let kServiceUUIDBytes: [UInt8] = [
+    0x00, 0x00, 0x07, 0x9a, 0xd1, 0x02, 0x11, 0xe1,
+    0x9b, 0x23, 0x00, 0x02, 0x5b, 0x00, 0xa5, 0xa5,
+]
+let kFallbackChannelID: UInt8 = 5
+let kOfflineAfter: TimeInterval = 20      // 兜底：超过 20 秒没新数据显示未连接
+let kFrameSilenceAfter: TimeInterval = 15 // 通道还开着但 15 秒没帧 = 链路已经断了
+
+let isDebug = ProcessInfo.processInfo.environment["EB_DEBUG"] != nil
+
+func debugLog(_ text: @autoclosure () -> String) {
+    guard isDebug else { return }
+    print(text())
+    fflush(stdout)
+}
+
+// MARK: - 降噪 / 均衡器 取值
+
+/// 降噪三态。anc 表示「降噪开着」，具体强度在 ANCLevel。
+enum NoiseMode: Hashable {
+    case noise
+    case transparency
+    case off
+
+    var label: String {
+        switch self {
+        case .noise: return "降噪"
+        case .transparency: return "通透"
+        case .off: return "关闭"
+        }
+    }
+
+    /// 写命令用的单字节值（不带强度时 anc 用 0x02，耳机会用上次的强度）
+    var commandValue: UInt8 {
+        switch self {
+        case .noise: return 0x02
+        case .transparency: return 0x04
+        case .off: return 0x01
+        }
+    }
+}
+
+enum ANCLevel: String, Hashable, CaseIterable {
+    case max, moderate, mild, smart
+
+    var label: String {
+        switch self {
+        case .max: return "深度"
+        case .moderate: return "中度"
+        case .mild: return "轻度"
+        case .smart: return "智能"
+        }
+    }
+
+    var commandValue: UInt8 {
+        switch self {
+        case .max: return 0x10
+        case .moderate: return 0x20
+        case .mild: return 0x40
+        case .smart: return 0x80
+        }
+    }
+
+    /// 主动上报里降噪块的低字节（高字节只有关/通透用到）
+    static func from(reportValue: UInt16) -> (mode: NoiseMode, level: ANCLevel?)? {
+        switch reportValue {
+        case 0x0008: return (.off, nil)
+        case 0x0100: return (.transparency, nil)
+        case 0x0010: return (.noise, .max)
+        case 0x0020: return (.noise, .moderate)
+        case 0x0040: return (.noise, .mild)
+        case 0x0080: return (.noise, .smart)
+        default: return nil
+        }
+    }
+}
+
+/// 均衡器预设。raw 是协议里的字节：0=至臻原音 1=澎湃低音 2=纯享人声
+enum EQPreset: Int, Hashable, CaseIterable {
+    case original = 0
+    case bass = 1
+    case vocals = 2
+
+    var label: String {
+        switch self {
+        case .original: return "至臻原音"
+        case .bass: return "澎湃低音"
+        case .vocals: return "纯享人声"
+        }
+    }
+
+    static func from(raw: UInt8) -> EQPreset? {
+        EQPreset(rawValue: Int(raw))
+    }
+}
+
+// MARK: - 帧编解码
+
+enum FrameCodec {
+
+    /// 组一帧。b2 b3 固定 00 00，opcode 大端，payload 长度小端。
+    static func make(opcode: UInt16, seq: UInt8, payload: [UInt8]) -> [UInt8] {
+        let bodyLength = payload.count + 7
+        let length: [UInt8] = bodyLength < 128
+            ? [UInt8(bodyLength)]
+            : [UInt8(bodyLength & 0x7f) | 0x80, UInt8(bodyLength >> 7)]
+        return [0xAA] + length
+            + [0x00, 0x00, UInt8(opcode >> 8), UInt8(opcode & 0xff), seq,
+               UInt8(payload.count & 0xff), UInt8((payload.count >> 8) & 0xff)]
+            + payload
+    }
+
+    struct ParsedFrame {
+        let opcode: UInt16
+        let sequence: UInt8
+        let payload: [UInt8]
+    }
+
+    /// 从缓冲里抽完整帧，遇到半截留着。粘帧、拆帧、脏字节都能重同步。
+    static func drain(from buffer: inout [UInt8]) -> [ParsedFrame] {
+        var frames: [ParsedFrame] = []
+        while true {
+            guard let start = buffer.firstIndex(of: 0xAA) else {
+                buffer.removeAll()
+                break
+            }
+            if start > 0 { buffer.removeFirst(start) }
+            guard buffer.count >= 2 else { break }
+            let lengthBytes = buffer[1] & 0x80 == 0 ? 1 : 2
+            guard buffer.count >= 1 + lengthBytes else { break }
+            if lengthBytes == 2 && buffer[2] & 0x80 != 0 {
+                buffer.removeFirst() // 变长长度第三字节不该有高位，这不是帧头
+                continue
+            }
+            let bodyLength = Int(buffer[1] & 0x7f) + (lengthBytes == 2 ? Int(buffer[2]) << 7 : 0)
+            guard bodyLength >= 7 else {
+                buffer.removeFirst() // 太短不可能是帧，丢掉这个 0xAA 找下一个
+                continue
+            }
+            let total = 1 + lengthBytes + bodyLength
+            guard buffer.count >= total else { break }
+            let body = Array(buffer[(1 + lengthBytes)..<total])
+            let paylen = Int(body[5]) | (Int(body[6]) << 8)
+            guard paylen + 7 == bodyLength else {
+                buffer.removeFirst() // 两个长度对不上，说明这不是真帧边界
+                continue
+            }
+            buffer.removeFirst(total)
+            frames.append(ParsedFrame(
+                opcode: UInt16(body[2]) << 8 | UInt16(body[3]),
+                sequence: body[4],
+                payload: Array(body[7...])))
+        }
+        return frames
+    }
+}
+
+// MARK: - 04 02 状态块解析
+
+struct StatusReport {
+    var battery: [(id: UInt8, raw: UInt8)] = []
+    var placement: [(id: UInt8, value: UInt8)] = []
+    var noiseValue: UInt16? = nil
+    var hasNoise = false
+
+    /// payload = 若干个块：<type> <count> <条目...>，电量/放置条目 2 字节，降噪条目 3 字节
+    static func parse(_ payload: [UInt8]) -> StatusReport {
+        var report = StatusReport()
+        var i = 0
+        while i + 1 < payload.count {
+            let type = payload[i]
+            let count = Int(payload[i + 1])
+            i += 2
+            switch type {
+            case 0x01, 0x02:
+                for _ in 0..<count {
+                    guard i + 1 < payload.count else { return report }
+                    let id = payload[i], value = payload[i + 1]
+                    i += 2
+                    if type == 0x01 { report.battery.append((id, value)) }
+                    else { report.placement.append((id, value)) }
+                }
+            case 0x03:
+                // 条目 = (id, u16le)。count != 1 的是智能模式伴随块，按长度跳过不解释
+                let size = count * 3
+                if count == 1, i + 2 < payload.count {
+                    report.noiseValue = UInt16(payload[i + 1]) | (UInt16(payload[i + 2]) << 8)
+                    report.hasNoise = true
+                }
+                i += size
+            default:
+                return report // 不认识的块类型，剩下的不猜
+            }
+        }
+        return report
+    }
+}
 
 // MARK: - 快照
 
 struct Snapshot {
     var online = false
-    var name = "Enco Air5 Pro"
-    var productID: Int? = nil
+    var name = "OPPO Enco Air5 Pro"
     var left: Int? = nil
     var right: Int? = nil
     var caseLevel: Int? = nil
     var leftCharging = false
     var rightCharging = false
     var caseCharging = false
+    var noiseMode: NoiseMode? = nil
+    var noiseLevel: ANCLevel? = nil
+    var eq: EQPreset? = nil
+    var firmware: String? = nil
+    var pendingNoise = false
+    var pendingEQ = false
+    var lastError: String? = nil
     var updatedAt: Date? = nil
 }
 
-// MARK: - 状态
+// MARK: - 状态模型
 
 final class BatteryModel: ObservableObject {
     @Published var online = false
-    @Published var name = "Enco Air5 Pro"
+    @Published var name = "OPPO Enco Air5 Pro"
     @Published var left: Int? = nil
     @Published var right: Int? = nil
     @Published var caseLevel: Int? = nil
     @Published var leftCharging = false
     @Published var rightCharging = false
     @Published var caseCharging = false
+    @Published var noiseMode: NoiseMode? = nil
+    @Published var noiseLevel: ANCLevel? = nil
+    @Published var eq: EQPreset? = nil
+    @Published var firmware: String? = nil
+    @Published var pendingNoise = false
+    @Published var pendingEQ = false
+    @Published var lastError: String? = nil
     @Published var lastUpdate: Date? = nil
 
     func apply(_ s: Snapshot) {
-        name = s.name
         online = s.online
+        name = s.name
         left = s.left
         right = s.right
         caseLevel = s.caseLevel
         leftCharging = s.leftCharging
         rightCharging = s.rightCharging
         caseCharging = s.caseCharging
+        noiseMode = s.noiseMode
+        noiseLevel = s.noiseLevel
+        eq = s.eq
+        firmware = s.firmware
+        pendingNoise = s.pendingNoise
+        pendingEQ = s.pendingEQ
+        lastError = s.lastError
         if let t = s.updatedAt { lastUpdate = t }
     }
 
     /// 菜单栏和标题用的「整体电量」：取左右耳里更低的那只
     var overallLevel: Int? {
-        let levels = [left, right].compactMap { $0 }
-        return levels.min()
+        [left, right].compactMap { $0 }.min()
     }
 
     var anyCharging: Bool { leftCharging || rightCharging || caseCharging }
@@ -82,7 +310,7 @@ final class BatteryModel: ObservableObject {
     }
 }
 
-// MARK: - 行
+// MARK: - 电量行（v1 样式保留）
 
 private struct LevelRow: View {
     let badge: String
@@ -145,10 +373,44 @@ private struct LevelRow: View {
     }
 }
 
+// MARK: - 选择按钮
+
+private struct PillRow<Value: Hashable>: View {
+    let options: [(value: Value, label: String)]
+    let selection: Value?
+    let disabled: Bool
+    let action: (Value) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(options, id: \.value) { option in
+                let selected = selection == option.value
+                Button {
+                    action(option.value)
+                } label: {
+                    Text(option.label)
+                        .font(.subheadline.weight(selected ? .semibold : .regular))
+                        .frame(maxWidth: .infinity, minHeight: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(selected ? Color.accentColor : Color.primary.opacity(0.75))
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(selected ? AnyShapeStyle(Color.accentColor.opacity(0.16)) : AnyShapeStyle(.quaternary))
+                )
+                .disabled(disabled)
+            }
+        }
+    }
+}
+
 // MARK: - 浮层内容
 
 private struct BatteryPopover: View {
     @ObservedObject var model: BatteryModel
+    var onSetNoise: ((NoiseMode, ANCLevel?) -> Void)? = nil
+    var onSetEQ: ((EQPreset) -> Void)? = nil
 
     private static let relativeTime: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
@@ -157,8 +419,10 @@ private struct BatteryPopover: View {
         return formatter
     }()
 
+    private var controlsDisabled: Bool { !model.online }
+
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 12) {
             header
             VStack(spacing: 9) {
                 LevelRow(badge: "L", title: "左耳", level: model.left, charging: model.leftCharging)
@@ -166,10 +430,19 @@ private struct BatteryPopover: View {
                 LevelRow(badge: "仓", title: "充电仓", level: model.caseLevel, charging: model.caseCharging)
             }
             Divider()
+            noiseSection
+            eqSection
+            Divider()
             statusRow
+            if let error = model.lastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .padding(16)
-        .frame(width: 320)
+        .frame(width: 336)
         .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -199,75 +472,111 @@ private struct BatteryPopover: View {
         }
     }
 
-    private var statusRow: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(model.online ? (model.anyCharging ? Color.green : Color.secondary) : Color.secondary)
-                .frame(width: 6, height: 6)
-                .accessibilityHidden(true)
-
-            Text(model.statusTitle)
-                .font(.subheadline)
-                .foregroundStyle(model.online ? Color.primary : Color.secondary)
-
-            Spacer(minLength: 8)
-
-            if let lastUpdate = model.lastUpdate {
-                Group {
-                    if model.online {
-                        Text("刚刚更新")
-                    } else {
-                        TimelineView(.periodic(from: lastUpdate, by: 60)) { context in
-                            let age = context.date.timeIntervalSince(lastUpdate)
-                            let updated = age < 60
-                                ? "不到 1 分钟前"
-                                : Self.relativeTime.localizedString(for: lastUpdate, relativeTo: context.date)
-                            Text(updated)
-                        }
-                    }
+    private var noiseSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Text("降噪")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                if model.pendingNoise { ProgressView().controlSize(.mini) }
+            }
+            PillRow(
+                options: [NoiseMode.noise, .transparency, .off].map { ($0, $0.label) },
+                selection: model.noiseMode,
+                disabled: controlsDisabled || model.pendingNoise
+            ) { mode in
+                onSetNoise?(mode, nil)
+            }
+            if model.noiseMode == .noise {
+                PillRow(
+                    options: ANCLevel.allCases.map { ($0, $0.label) },
+                    selection: model.noiseLevel,
+                    disabled: controlsDisabled || model.pendingNoise
+                ) { level in
+                    onSetNoise?(.noise, level)
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
             }
         }
     }
+
+    private var eqSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Text("音效")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                if model.pendingEQ { ProgressView().controlSize(.mini) }
+            }
+            PillRow(
+                options: [EQPreset.original, .vocals, .bass].map { ($0, $0.label) },
+                selection: model.eq,
+                disabled: controlsDisabled || model.pendingEQ
+            ) { preset in
+                onSetEQ?(preset)
+            }
+        }
+    }
+
+    private var statusRow: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(model.online ? (model.anyCharging ? Color.green : Color.secondary) : Color.secondary)
+                    .frame(width: 6, height: 6)
+                    .accessibilityHidden(true)
+
+                Text(model.statusTitle)
+                    .font(.subheadline)
+                    .foregroundStyle(model.online ? Color.primary : Color.secondary)
+
+                Spacer(minLength: 8)
+
+                Text(firmwareText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Spacer(minLength: 0)
+                if let lastUpdate = model.lastUpdate {
+                    Group {
+                        if model.online {
+                            Text("刚刚更新")
+                        } else {
+                            TimelineView(.periodic(from: lastUpdate, by: 60)) { context in
+                                let age = context.date.timeIntervalSince(lastUpdate)
+                                let updated = age < 60
+                                    ? "不到 1 分钟前"
+                                    : Self.relativeTime.localizedString(for: lastUpdate, relativeTo: context.date)
+                                Text(updated)
+                            }
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var firmwareText: String {
+        if let firmware = model.firmware { return "固件 \(firmware)" }
+        return model.online ? "读取固件中…" : ""
+    }
 }
 
-// MARK: - 蓝牙链路
+// MARK: - RFCOMM 接收
 
 private final class Receiver: NSObject, IOBluetoothRFCOMMChannelDelegate {
-    var onFrame: (([UInt8]) -> Void)?
+    var onFrame: ((UInt16, UInt8, [UInt8]) -> Void)?
     var onClosed: (() -> Void)?
     private var buffer: [UInt8] = []
 
     func rfcommChannelData(_ channel: IOBluetoothRFCOMMChannel!, data: UnsafeMutableRawPointer!, length: Int) {
-        buffer.append(contentsOf: UnsafeRawBufferPointer(start: data, count: length))
-        while buffer.count >= 2 {
-            guard buffer[0] == 0xAA else {
-                buffer.removeFirst()
-                continue
-            }
-            // len 为 7-bit varint（帧总长 - 2）
-            var value = 0
-            var shift = 0
-            var index = 1
-            var complete = false
-            while index < buffer.count, index < 5 {
-                let byte = buffer[index]
-                value |= Int(byte & 0x7F) << shift
-                index += 1
-                if byte & 0x80 == 0 {
-                    complete = true
-                    break
-                }
-                shift += 7
-            }
-            guard complete else { break }
-            let total = index + value
-            guard buffer.count >= total else { break }
-            let frame = Array(buffer[0..<total])
-            buffer.removeFirst(total)
-            onFrame?(frame)
+        let incoming = Array(UnsafeRawBufferPointer(start: data, count: length))
+        debugLog("raw-rx \(incoming.map { String(format: "%02x", $0) }.joined(separator: " "))")
+        buffer.append(contentsOf: incoming)
+        for frame in FrameCodec.drain(from: &buffer) {
+            onFrame?(frame.opcode, frame.sequence, frame.payload)
         }
     }
 
@@ -276,24 +585,73 @@ private final class Receiver: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 }
 
+// MARK: - 会话（长连接）
+
+/// 耳机控制会话。独占一个后台线程（带 RunLoop），通道常开：
+/// hello → 初始查询（电量/固件/音效）→ 之后靠主动上报刷新，每 15s 查一次电量当心跳。
+/// 写命令只发一次，3 秒内等回报确认。
 final class EncoLink {
 
-    var onUpdate: ((Snapshot) -> Void)?
+    var onUpdate: ((Snapshot) -> Void)? = nil
 
-    private let interval: TimeInterval
-    private let debugMode = ProcessInfo.processInfo.environment["EB_DEBUG"] != nil
+    enum InboxCommand {
+        case refresh
+        case noise(NoiseMode, ANCLevel?)
+        case eq(EQPreset)
+        case reconnect
+        case rawTest(opcode: UInt16, payload: [UInt8])
+    }
+
+    private enum QueryKind { case battery, deviceInfo, equalizer }
+
+    private enum ItemKind {
+        case hello
+        case query(QueryKind)
+        case writeNoise(mode: NoiseMode, level: ANCLevel?)
+        case writeEQ(EQPreset)
+        case rawTest(opcode: UInt16, payload: [UInt8])
+    }
+
+    private struct QueuedItem {
+        let kind: ItemKind
+        let frame: [UInt8]
+        var attempts: Int = 0
+    }
+
+    private struct ActiveItem {
+        let item: QueuedItem
+        let deadline: Date
+    }
+
+    private struct PendingWrite {
+        let mode: NoiseMode?
+        let level: ANCLevel?
+        let preset: EQPreset?
+        let deadline: Date
+    }
+
+    private let keepaliveInterval: TimeInterval
     private var thread: Thread?
     private var stopped = false
     private let lock = NSLock()
-    private var manualRequest = false
+    private var inbox: [InboxCommand] = []
 
     private var device: IOBluetoothDevice?
     private var receiver: Receiver?
+    private var channel: IOBluetoothRFCOMMChannel?
     private var seq: UInt8 = 0
+    private var waiting: [QueuedItem] = []
+    private var active: ActiveItem?
+    private var nextSendAt = Date.distantPast
+    private var pendingWrite: PendingWrite?
+    private var nextKeepalive = Date.distantPast
+    private var lastFrameAt = Date.distantPast
+    private var nextOpenAt = Date.distantPast
+
     private var snapshot = Snapshot()
 
-    init(interval: TimeInterval) {
-        self.interval = interval
+    init(keepaliveInterval: TimeInterval) {
+        self.keepaliveInterval = keepaliveInterval
     }
 
     func start() {
@@ -304,9 +662,9 @@ final class EncoLink {
         t.start()
     }
 
-    func requestRefresh() {
+    func send(_ command: InboxCommand) {
         lock.lock()
-        manualRequest = true
+        inbox.append(command)
         lock.unlock()
     }
 
@@ -315,160 +673,123 @@ final class EncoLink {
     private func run() {
         let runLoop = RunLoop.current
         runLoop.add(Port(), forMode: .default)
-        var next = Date()
         while !stopped {
-            var due = Date() >= next
-            lock.lock()
-            if manualRequest { manualRequest = false; due = true }
-            lock.unlock()
-            if due {
-                poll()
-                next = Date().addingTimeInterval(interval)
-            }
-            runLoop.run(until: Date().addingTimeInterval(0.1))
+            tick(Date())
+            runLoop.run(until: Date().addingTimeInterval(0.25))
         }
     }
 
-    private func poll() {
-        guard let dev = resolveDevice() else {
-            publish(online: false)
-            return
-        }
-        guard dev.isConnected() else {
-            publish(online: false)
+    private func tick(_ now: Date) {
+        drainInbox()
+
+        if channel == nil {
+            if now >= nextOpenAt {
+                openChannel()
+            }
             return
         }
 
-        let rx = Receiver()
-        rx.onFrame = { [weak self] frame in self?.ingest(frame) }
-        rx.onClosed = { [weak self] in self?.receiver = nil }
-
-        guard let channel = open(dev, delegate: rx) else {
-            publish(online: false)
+        // 链路哑了：15 秒没帧说明耳机那边已经没了，主动重建
+        if now.timeIntervalSince(lastFrameAt) > kFrameSilenceAfter {
+            debugLog("link silent \(Int(now.timeIntervalSince(lastFrameAt)))s, reopening")
+            closeChannel(retryDelay: 1.5)
             return
         }
-        receiver = rx
 
-        // 产品 id 只查一次
-        if snapshot.productID == nil {
-            send(channel, cmd: 0x0103)
-            wait(0.5)
+        // 心跳查询
+        if now >= nextKeepalive {
+            enqueue(.init(kind: .query(.battery), frame: makeQuery(0x0601)))
+            nextKeepalive = now.addingTimeInterval(keepaliveInterval)
         }
-        send(channel, cmd: 0x0106)
-        wait(1.5)
 
-        channel.close()
-        receiver = nil
-        publish(online: true)
-    }
+        // 队列推进
+        if active == nil, !waiting.isEmpty, now >= nextSendAt {
+            let item = waiting.removeFirst()
+            sendItem(item, now: now)
+        }
 
-    // MARK: SPP
-
-    /// 第一次 open 必定超时（mux 建立），这里重试拿到真通道。
-    private func open(_ dev: IOBluetoothDevice, delegate: Receiver) -> IOBluetoothRFCOMMChannel? {
-        for attempt in 1...3 {
-            var channel: IOBluetoothRFCOMMChannel? = nil
-            let started = Date()
-            let result = dev.openRFCOMMChannelSync(&channel, withChannelID: kChannelID, delegate: delegate)
-            let ms = Int(Date().timeIntervalSince(started) * 1000)
-            if debugMode {
-                print(String(format: "open ch%d #%d -> 0x%X %dms", kChannelID, attempt, UInt32(bitPattern: result), ms))
-                fflush(stdout)
+        // 查询超时重试一次
+        if let running = active, now >= running.deadline {
+            active = nil
+            var item = running.item
+            item.attempts += 1
+            if case .query = item.kind, item.attempts < 2 {
+                waiting.insert(item, at: 0)
             }
-            if result == kIOReturnSuccess, let channel { return channel }
-            Thread.sleep(forTimeInterval: 0.2)
         }
-        return nil
-    }
 
-    private func send(_ channel: IOBluetoothRFCOMMChannel, cmd: UInt16, payload: [UInt8] = []) {
-        seq &+= 1
-        let declared = 7 + payload.count
-        var bytes: [UInt8] = [
-            0xAA,
-            UInt8(declared & 0x7F),
-            0x00, 0x00,
-            UInt8(cmd & 0xFF), UInt8(cmd >> 8),
-            seq,
-            UInt8(payload.count & 0xFF), UInt8((payload.count >> 8) & 0xFF),
-        ]
-        bytes += payload
-        var mutable = bytes
-        let result = mutable.withUnsafeMutableBufferPointer { pointer -> IOReturn in
-            channel.writeSync(pointer.baseAddress!, length: UInt16(bytes.count))
-        }
-        if debugMode {
-            print("tx " + bytes.map { String(format: "%02x", $0) }.joined(separator: " ")
-                  + String(format: " w=0x%X", UInt32(bitPattern: result)))
-            fflush(stdout)
+        // 写命令确认超时：不重试，报「未确认」
+        if let write = pendingWrite, now >= write.deadline {
+            pendingWrite = nil
+            snapshot.pendingNoise = false
+            snapshot.pendingEQ = false
+            snapshot.lastError = write.preset != nil ? "音效设置未确认" : "降噪设置未确认"
+            publish()
         }
     }
 
-    private func wait(_ seconds: TimeInterval) {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        }
-    }
+    private func drainInbox() {
+        lock.lock()
+        let commands = inbox
+        inbox = []
+        lock.unlock()
 
-    // MARK: 解析
-
-    private func ingest(_ frame: [UInt8]) {
-        if debugMode {
-            print("rx " + frame.map { String(format: "%02x", $0) }.joined(separator: " "))
-            fflush(stdout)
-        }
-        guard frame.count >= 9 else { return }
-        let body = Array(frame[2...])
-        let cmd = UInt16(body[2]) | (UInt16(body[3]) << 8)
-        let payload = Array(body[7...])
-
-        switch cmd {
-        case 0x8103 where payload.count >= 4:
-            snapshot.productID = Int(payload[1]) | (Int(payload[2]) << 8) | (Int(payload[3]) << 16)
-            if debugMode {
-                print(String(format: "product id = %06X", snapshot.productID ?? 0))
-                fflush(stdout)
-            }
-
-        case 0x8106 where payload.count >= 2:
-            let count = Int(payload[1])
-            var left: Int? = nil, right: Int? = nil, caseLevel: Int? = nil
-            var leftCharging = false, rightCharging = false, caseCharging = false
-            for i in 0..<count {
-                let base = 2 + i * 2
-                guard base + 1 < payload.count else { break }
-                let id = payload[base]
-                guard id != 0xFF else { continue }
-                let raw = Int(payload[base + 1])
-                let level = raw & 0x7F
-                let charging = raw & 0x80 != 0
-                switch id {
-                case 1: left = level; leftCharging = charging
-                case 2: right = level; rightCharging = charging
-                case 3: caseLevel = level; caseCharging = charging
-                default: break
+        for command in commands {
+            switch command {
+            case .refresh:
+                if channel != nil { enqueue(.init(kind: .query(.battery), frame: makeQuery(0x0601))) }
+            case .reconnect:
+                closeChannel(retryDelay: 0)
+                nextOpenAt = Date()
+            case .rawTest(let opcode, let payload):
+                guard channel != nil else {
+                    debugLog("rawTest skipped: no channel")
+                    continue
                 }
+                snapshot.lastError = nil
+                publish()
+                enqueueFront(.init(kind: .rawTest(opcode: opcode, payload: payload),
+                                   frame: FrameCodec.make(opcode: opcode, seq: nextSeq(), payload: payload)))
+            case .noise(let mode, let level):
+                guard channel != nil else {
+                    snapshot.lastError = "耳机未连接"
+                    publish()
+                    continue
+                }
+                guard pendingWrite == nil else {
+                    snapshot.lastError = "上一条设置还没确认"
+                    publish()
+                    continue
+                }
+                let value = level?.commandValue ?? mode.commandValue
+                snapshot.lastError = nil
+                snapshot.pendingNoise = true
+                publish()
+                enqueueFront(.init(
+                    kind: .writeNoise(mode: mode, level: level),
+                    frame: FrameCodec.make(opcode: 0x0404, seq: nextSeq(), payload: [0x01, 0x01, value])))
+            case .eq(let preset):
+                guard channel != nil else {
+                    snapshot.lastError = "耳机未连接"
+                    publish()
+                    continue
+                }
+                guard pendingWrite == nil else {
+                    snapshot.lastError = "上一条设置还没确认"
+                    publish()
+                    continue
+                }
+                snapshot.lastError = nil
+                snapshot.pendingEQ = true
+                publish()
+                enqueueFront(.init(
+                    kind: .writeEQ(preset),
+                    frame: FrameCodec.make(opcode: 0x0604, seq: nextSeq(), payload: [UInt8(preset.rawValue)])))
             }
-            snapshot.left = left
-            snapshot.right = right
-            snapshot.caseLevel = caseLevel
-            snapshot.leftCharging = leftCharging
-            snapshot.rightCharging = rightCharging
-            snapshot.caseCharging = caseCharging
-            snapshot.updatedAt = Date()
-            snapshot.online = true
-            if debugMode {
-                print("battery L=\(left.map(String.init) ?? "-") R=\(right.map(String.init) ?? "-") case=\(caseLevel.map(String.init) ?? "-")")
-                fflush(stdout)
-            }
-
-        default:
-            break
         }
     }
 
-    // MARK: 设备发现
+    // MARK: 通道
 
     private func resolveDevice() -> IOBluetoothDevice? {
         if let existing = device, existing.isConnected() { return existing }
@@ -496,15 +817,287 @@ final class EncoLink {
             snapshot.name = candidate.name ?? snapshot.name
             return candidate
         }
-        if debugMode {
-            print("no candidate among \(paired.count) paired devices")
-            fflush(stdout)
-        }
+        debugLog("no candidate among \(paired.count) paired devices")
         return nil
     }
 
-    private func publish(online: Bool) {
-        snapshot.online = online && snapshot.updatedAt != nil
+    /// 通道号优先从 SDP record 拿，拿不到再退回 5
+    private func resolveChannelID(_ dev: IOBluetoothDevice) -> UInt8 {
+        let uuid = IOBluetoothSDPUUID(bytes: kServiceUUIDBytes, length: kServiceUUIDBytes.count)
+        guard let record = dev.getServiceRecord(for: uuid) else {
+            return kFallbackChannelID
+        }
+        var channelID: BluetoothRFCOMMChannelID = kFallbackChannelID
+        guard record.getRFCOMMChannelID(&channelID) == kIOReturnSuccess else {
+            return kFallbackChannelID
+        }
+        return UInt8(channelID)
+    }
+
+    /// 第一次 open 必定超时（mux 建立），重试拿到真通道
+    private func openChannel() {
+        guard let dev = resolveDevice() else {
+            snapshot.online = false
+            publish()
+            nextOpenAt = Date().addingTimeInterval(2)
+            return
+        }
+        guard dev.isConnected() else {
+            snapshot.online = false
+            publish()
+            nextOpenAt = Date().addingTimeInterval(2)
+            return
+        }
+
+        let channelID = resolveChannelID(dev)
+        let rx = Receiver()
+        rx.onFrame = { [weak self] opcode, sequence, payload in
+            self?.ingest(opcode: opcode, sequence: sequence, payload: payload)
+        }
+        rx.onClosed = { [weak self] in
+            self?.closeChannel(retryDelay: 2)
+        }
+
+        for attempt in 1...3 {
+            var opened: IOBluetoothRFCOMMChannel? = nil
+            let started = Date()
+            let result = dev.openRFCOMMChannelSync(&opened, withChannelID: channelID, delegate: rx)
+            let ms = Int(Date().timeIntervalSince(started) * 1000)
+            debugLog("open ch\(channelID) #\(attempt) -> 0x\(String(UInt32(bitPattern: result), radix: 16)) \(ms)ms")
+            if result == kIOReturnSuccess, let opened {
+                channel = opened
+                receiver = rx
+                lastFrameAt = Date()
+                startSession()
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.35)
+        }
+        snapshot.online = false
+        publish()
+        nextOpenAt = Date().addingTimeInterval(5)
+    }
+
+    private func closeChannel(retryDelay: TimeInterval) {
+        if let channel { channel.close() }
+        channel = nil
+        receiver = nil
+        waiting.removeAll()
+        active = nil
+        pendingWrite = nil
+        nextSendAt = Date.distantPast
+        snapshot.pendingNoise = false
+        snapshot.pendingEQ = false
+        snapshot.online = false
+        publish()
+        nextOpenAt = Date().addingTimeInterval(retryDelay)
+        debugLog("channel closed, retry in \(retryDelay)s")
+    }
+
+    /// hello + 初始查询。查询走串行队列，间隔 0.2s 自然铺开
+    private func startSession() {
+        enqueue(.init(kind: .hello, frame: FrameCodec.make(opcode: 0x0001, seq: nextSeq(), payload: [])))
+        enqueue(.init(kind: .query(.battery), frame: makeQuery(0x0601)))
+        enqueue(.init(kind: .query(.deviceInfo), frame: makeQuery(0x0501)))
+        enqueue(.init(kind: .query(.equalizer), frame: makeQuery(0x0f01)))
+        nextKeepalive = Date().addingTimeInterval(keepaliveInterval)
+    }
+
+    // MARK: 收发
+
+    private func makeQuery(_ opcode: UInt16) -> [UInt8] {
+        FrameCodec.make(opcode: opcode, seq: nextSeq(), payload: [])
+    }
+
+    private func nextSeq() -> UInt8 {
+        seq &+= 1
+        return seq
+    }
+
+    private func enqueue(_ item: QueuedItem) {
+        waiting.append(item)
+    }
+
+    private func enqueueFront(_ item: QueuedItem) {
+        waiting.insert(item, at: 0)
+    }
+
+    private func sendItem(_ item: QueuedItem, now: Date) {
+        guard let channel else { return }
+        var bytes = item.frame
+        let result = bytes.withUnsafeMutableBufferPointer { pointer -> IOReturn in
+            channel.writeSync(pointer.baseAddress!, length: UInt16(item.frame.count))
+        }
+        debugLog("tx \(item.frame.map { String(format: "%02x", $0) }.joined(separator: " ")) w=0x\(String(UInt32(bitPattern: result), radix: 16))")
+        nextSendAt = now.addingTimeInterval(0.2)
+
+        switch item.kind {
+        case .query:
+            active = ActiveItem(item: item, deadline: now.addingTimeInterval(1.5))
+        case .hello:
+            break
+        case .writeNoise(let mode, let level):
+            pendingWrite = PendingWrite(mode: mode, level: level, preset: nil, deadline: now.addingTimeInterval(3))
+        case .writeEQ(let preset):
+            pendingWrite = PendingWrite(mode: nil, level: nil, preset: preset,
+                                        deadline: now.addingTimeInterval(3))
+            // 音效写完立刻读回确认（耳机的写完上报不一定发）
+            enqueue(.init(kind: .query(.equalizer), frame: makeQuery(0x0f01)))
+        case .rawTest:
+            break // 裸探测：只看 0484/回显，不做状态跟踪
+        }
+    }
+
+    // MARK: 解析
+
+    private func ingest(opcode: UInt16, sequence: UInt8, payload: [UInt8]) {
+        lastFrameAt = Date()
+        debugLog("rx \(String(format: "%04x", opcode)) \(payload.map { String(format: "%02x", $0) }.joined(separator: " "))")
+        var changed = false
+
+        switch opcode {
+        case 0x0681: // 电量查询回包：status + count + (id, 值)... 这里 0 是真 0%
+            guard payload.count >= 2, payload[0] == 0 else { break }
+            let count = Int(payload[1])
+            var left: Int? = nil, right: Int? = nil, caseLevel: Int? = nil
+            var leftCharging = false, rightCharging = false, caseCharging = false
+            for i in 0..<count {
+                let base = 2 + i * 2
+                guard base + 1 < payload.count else { break }
+                let raw = Int(payload[base + 1])
+                let level = raw & 0x7f
+                let charging = raw & 0x80 != 0
+                switch payload[base] {
+                case 1: left = level; leftCharging = charging
+                case 2: right = level; rightCharging = charging
+                case 3: caseLevel = level; caseCharging = charging
+                default: break
+                }
+            }
+            snapshot.left = left
+            snapshot.right = right
+            snapshot.caseLevel = caseLevel
+            snapshot.leftCharging = leftCharging
+            snapshot.rightCharging = rightCharging
+            snapshot.caseCharging = caseCharging
+            snapshot.updatedAt = Date()
+            changed = true
+            finishQuery(.battery)
+
+        case 0x0402: // 主动状态上报：电量 0 = 休眠，语义和查询回包不同
+            let report = StatusReport.parse(payload)
+            for entry in report.battery {
+                let charging = entry.raw & 0x80 != 0
+                let level: Int? = entry.raw == 0 ? nil : Int(entry.raw & 0x7f)
+                switch entry.id {
+                case 1:
+                    snapshot.left = level
+                    snapshot.leftCharging = charging
+                case 2:
+                    snapshot.right = level
+                    snapshot.rightCharging = charging
+                case 3:
+                    snapshot.caseLevel = level
+                    snapshot.caseCharging = charging
+                default: break
+                }
+            }
+            for entry in report.placement where entry.id == 1 || entry.id == 2 {
+                // 进仓且没在充电：旧电量作废，等重新上报
+                guard entry.value == 0x04 else { continue }
+                let charging = entry.id == 1 ? snapshot.leftCharging : snapshot.rightCharging
+                guard !charging else { continue }
+                if entry.id == 1 { snapshot.left = nil } else { snapshot.right = nil }
+            }
+            if report.hasNoise, let value = report.noiseValue, let decoded = ANCLevel.from(reportValue: value) {
+                snapshot.noiseMode = decoded.mode
+                snapshot.noiseLevel = decoded.level
+                confirmNoiseWrite(mode: decoded.mode, level: decoded.level)
+            }
+            snapshot.updatedAt = Date()
+            changed = true
+
+        case 0x0581: // 设备信息回包：status + 条目数 + UTF-8 CSV
+            guard payload.count >= 2, payload[0] == 0 else { break }
+            let csvData = Data(payload[2...])
+            let fields = (String(data: csvData, encoding: .utf8) ?? "")
+                .split(separator: ",").map(String.init)
+            var byType: [String: String] = [:]
+            for triple in stride(from: 0, to: fields.count - 2, by: 3) {
+                let deviceType = fields[triple]
+                let versionType = fields[triple + 1]
+                let value = fields[triple + 2]
+                if versionType == "2" { byType[deviceType] = value }
+            }
+            if let l = byType["1"], let r = byType["2"], let c = byType["3"] {
+                snapshot.firmware = "\(l).\(r).\(c)"
+            }
+            changed = true
+            finishQuery(.deviceInfo)
+
+        case 0x0f81: // 均衡器查询回包：status + preset
+            guard payload.count >= 2, payload[0] == 0, let preset = EQPreset.from(raw: payload[1]) else { break }
+            snapshot.eq = preset
+            changed = true
+            finishQuery(.equalizer)
+            confirmEQWrite(preset: preset)
+
+        case 0x0405: // 均衡器主动上报：preset
+            guard let preset = payload.first.flatMap({ EQPreset.from(raw: $0) }) else { break }
+            snapshot.eq = preset
+            changed = true
+            confirmEQWrite(preset: preset)
+
+        case 0x0484, 0x0684: // SET 回执：payload 首字节 00=受理，非 0=拒绝（如耳机在盒内）
+            guard let status = payload.first, status != 0 else { break } // 00 时等回显确认
+            let isEQ = opcode == 0x0684
+            guard let write = pendingWrite,
+                  (isEQ ? write.preset != nil : write.mode != nil) else { break }
+            pendingWrite = nil
+            snapshot.pendingNoise = false
+            snapshot.pendingEQ = false
+            snapshot.lastError = isEQ
+                ? "耳机拒绝了音效设置（可能不在佩戴状态）"
+                : "耳机拒绝了降噪设置（可能不在佩戴状态）"
+            changed = true
+
+        default:
+            break
+        }
+
+        if changed {
+            snapshot.online = true
+            publish()
+        }
+    }
+
+    private func finishQuery(_ kind: QueryKind) {
+        guard let running = active, case .query(let runningKind) = running.item.kind, runningKind == kind else { return }
+        active = nil
+    }
+
+    private func confirmNoiseWrite(mode: NoiseMode, level: ANCLevel?) {
+        guard let write = pendingWrite, write.mode != nil else { return }
+        guard write.mode == mode, write.level == nil || write.level == level else { return }
+        pendingWrite = nil
+        snapshot.pendingNoise = false
+        snapshot.lastError = nil
+        publish()
+    }
+
+    private func confirmEQWrite(preset: EQPreset) {
+        guard let write = pendingWrite, write.preset != nil else { return }
+        guard write.preset == preset else { return }
+        pendingWrite = nil
+        snapshot.pendingEQ = false
+        snapshot.lastError = nil
+        publish()
+    }
+
+    // MARK: 发布
+
+    private func publish() {
+        snapshot.online = snapshot.online && channel != nil
         let snapshot = self.snapshot
         DispatchQueue.main.async { [weak self] in
             self?.onUpdate?(snapshot)
@@ -528,13 +1121,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         let refreshItem = menu.addItem(withTitle: "刷新电量", action: #selector(refresh), keyEquivalent: "r")
         refreshItem.target = self
+        let reconnectItem = menu.addItem(withTitle: "重连耳机", action: #selector(reconnect), keyEquivalent: "")
+        reconnectItem.target = self
         menu.addItem(.separator())
         let quitItem = menu.addItem(withTitle: "退出 EncoBattery", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         return menu
     }()
-
-    private var debugMode: Bool { ProcessInfo.processInfo.environment["EB_DEBUG"] != nil }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -555,7 +1148,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatusItem()
 
         popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: BatteryPopover(model: model))
+        let popoverView = BatteryPopover(
+            model: model,
+            onSetNoise: { [weak self] mode, level in self?.setNoise(mode, level) },
+            onSetEQ: { [weak self] preset in self?.setEQ(preset) })
+        popover.contentViewController = NSHostingController(rootView: popoverView)
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.popover.isShown else { return event }
             if event.keyCode == 53 {
@@ -571,8 +1168,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
 
-        let interval = Double(ProcessInfo.processInfo.environment["EB_INTERVAL"] ?? "") ?? 30
-        let link = EncoLink(interval: interval)
+        let interval = Double(ProcessInfo.processInfo.environment["EB_INTERVAL"] ?? "") ?? 15
+        let link = EncoLink(keepaliveInterval: interval)
         link.onUpdate = { [weak self] snapshot in
             guard let self, !self.fakeActive else { return }
             self.model.apply(snapshot)
@@ -604,26 +1201,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 guard let self else { return }
                 self.fakeActive = true
-                self.model.name = "OPPO Enco Air5 Pro"
-                switch fake {
-                case "charging":
-                    self.model.online = true
-                    self.model.left = 82; self.model.right = 80; self.model.caseLevel = 96
-                    self.model.leftCharging = false; self.model.rightCharging = true; self.model.caseCharging = true
-                    self.model.lastUpdate = Date()
-                case "empty":
-                    self.model.online = true
-                    self.model.left = 46; self.model.right = 45
-                    self.model.lastUpdate = Date()
-                case "offline":
-                    self.model.online = false
-                default:
-                    break
-                }
+                applyFake(fake, to: self.model)
                 self.updateStatusItem()
             }
         }
-        if debugMode { print("started"); fflush(stdout) }
+        // headless 写命令自测：EB_TEST=noise:smart|noise:max|noise:moderate|noise:mild|noise:transparency|noise:off|eq:0|eq:1|eq:2
+        if let test = ProcessInfo.processInfo.environment["EB_TEST"], !test.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                guard let self else { return }
+                let parts = test.split(separator: ":").map(String.init)
+                if parts.first == "raw", parts.count >= 3,
+                   let opcode = UInt16(parts[1], radix: 16) {
+                    let hex = parts[2...].joined()
+                    var payload: [UInt8] = []
+                    var i = hex.startIndex
+                    while i < hex.endIndex, let next = hex.index(i, offsetBy: 2, limitedBy: hex.endIndex) {
+                        if let b = UInt8(hex[i..<next], radix: 16) { payload.append(b) }
+                        i = next
+                    }
+                    self.link?.send(.rawTest(opcode: opcode, payload: payload))
+                    debugLog("EB_TEST raw opcode=\(String(format: "%04x", opcode)) payload=\(payload.map { String(format: "%02x", $0) }.joined(separator: " "))")
+                    return
+                }
+                switch parts.first {
+                case "noise":
+                    let arg = parts.count > 1 ? parts[1] : ""
+                    let mode: NoiseMode
+                    let level: ANCLevel?
+                    switch arg {
+                    case "off": mode = .off; level = nil
+                    case "transparency": mode = .transparency; level = nil
+                    case "max": mode = .noise; level = .max
+                    case "moderate": mode = .noise; level = .moderate
+                    case "mild": mode = .noise; level = .mild
+                    default: mode = .noise; level = .smart
+                    }
+                    self.model.pendingNoise = true
+                    self.updateStatusItem()
+                    self.link?.send(.noise(mode, level))
+                    debugLog("EB_TEST set noise mode=\(mode) level=\(String(describing: level))")
+                case "eq":
+                    let raw = parts.count > 1 ? (Int(parts[1]) ?? 0) : 0
+                    if let preset = EQPreset(rawValue: raw) {
+                        self.model.pendingEQ = true
+                        self.updateStatusItem()
+                        self.link?.send(.eq(preset))
+                        debugLog("EB_TEST set eq \(preset)")
+                    }
+                default:
+                    debugLog("EB_TEST unknown command \(test)")
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 14.0) {
+                exit(0)
+            }
+        }
+        debugLog("started")
     }
 
     private func updateStatusItem() {
@@ -642,6 +1275,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         var tip = "\(model.name) · 左 \(model.left.map { "\($0)%" } ?? "—") 右 \(model.right.map { "\($0)%" } ?? "—")"
         if let c = model.caseLevel { tip += " · 仓 \(c)%" }
+        if let mode = model.noiseMode {
+            tip += " · 降噪 \(mode.label)\(mode == .noise ? "（\(model.noiseLevel?.label ?? "—")）" : "")"
+        }
+        if let eq = model.eq { tip += " · 音效 \(eq.label)" }
+        if let firmware = model.firmware { tip += " · 固件 \(firmware)" }
         button.toolTip = tip
 
         let color: NSColor = level <= 10 ? .systemRed : (level <= 20 ? .systemOrange : .labelColor)
@@ -668,13 +1306,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(nil)
         } else if let button = statusItem.button, button.window != nil,
                   let content = popover.contentViewController?.view {
-            if ProcessInfo.processInfo.environment["EB_DEBUG"] != nil {
-                print("toggle: buttonWindow=\(button.window != nil) fitting=\(content.fittingSize)")
-                fflush(stdout)
-            }
             popover.contentSize = content.fittingSize
             // LSUIElement 的后台 app 不激活的话，transient 浮层会刚出现就被收回
-            // NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             NSApp.activate(ignoringOtherApps: true)
             content.window?.makeKeyAndOrderFront(nil)
@@ -682,15 +1315,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let name = ProcessInfo.processInfo.environment["EB_APPEARANCE"] {
                 content.window?.appearance = NSAppearance(named: name == "dark" ? .darkAqua : .aqua)
             }
-            if ProcessInfo.processInfo.environment["EB_DEBUG"] != nil {
-                print("after show: isShown=\(popover.isShown) vis=\(popover.contentViewController?.view.window?.isVisible ?? false) occl=\(popover.contentViewController?.view.window?.occlusionState.rawValue ?? 0) win=\(popover.contentViewController?.view.window?.frame ?? .zero) screens=\(NSScreen.screens.map { $0.frame }) buttonWin=\(button.window?.frame ?? .zero)")
-                fflush(stdout)
-            }
         }
     }
 
+    private func setNoise(_ mode: NoiseMode, _ level: ANCLevel?) {
+        guard !fakeActive, model.online else { return }
+        model.pendingNoise = true
+        model.lastError = nil
+        link?.send(.noise(mode, level))
+    }
+
+    private func setEQ(_ preset: EQPreset) {
+        guard !fakeActive, model.online else { return }
+        model.pendingEQ = true
+        model.lastError = nil
+        link?.send(.eq(preset))
+    }
+
     @objc private func refresh() {
-        link?.requestRefresh()
+        link?.send(.refresh)
+    }
+
+    @objc private func reconnect() {
+        link?.send(.reconnect)
     }
 
     @objc private func quit() {
@@ -702,8 +1349,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
+// MARK: - 演示数据（截图与预览）
+
+func applyFake(_ fake: String, to model: BatteryModel) {
+    model.name = "OPPO Enco Air5 Pro"
+    model.firmware = "158.158.105"
+    switch fake {
+    case "charging":
+        model.online = true
+        model.left = 82; model.right = 80; model.caseLevel = 96
+        model.leftCharging = false; model.rightCharging = true; model.caseCharging = true
+        model.noiseMode = .off
+        model.eq = .original
+    case "empty":
+        model.online = true
+        model.left = 46; model.right = 45
+    case "anc":
+        model.online = true
+        model.left = 82; model.right = 80; model.caseLevel = 96
+        model.caseCharging = true
+        model.noiseMode = .noise; model.noiseLevel = .max
+        model.eq = .original
+    case "smart":
+        model.online = true
+        model.left = 64; model.right = 62
+        model.noiseMode = .noise; model.noiseLevel = .smart
+        model.eq = .vocals
+    case "eq":
+        model.online = true
+        model.left = 64; model.right = 62
+        model.noiseMode = .transparency
+        model.eq = .vocals
+    case "offline":
+        model.online = false
+        model.firmware = nil
+    default: // full
+        model.online = true
+        model.left = 82; model.right = 80; model.caseLevel = 96
+        model.caseCharging = true
+        model.noiseMode = .noise; model.noiseLevel = .moderate
+        model.eq = .original
+    }
+    model.lastUpdate = Date()
+}
 
 // 合成截图：菜单栏图标 + 三角指引 + 弹窗卡片，用于文档/README
 private struct ShotTriangle: Shape {
@@ -762,14 +1450,14 @@ private struct BatteryShot: View {
             .padding(.top, 10)
             .padding(.bottom, 40)
         }
-        .frame(width: 440)
+        .frame(width: 456)
         .background(background)
     }
 }
 
 // 离屏渲染电量卡片，用于文档/截图：EB_RENDER=/tmp/card.png EB_FAKE=charging EB_APPEARANCE=dark
 @MainActor func renderShot(to path: String, fake: String, dark: Bool) {
-    let model = makeFakeModel(fake)
+    let model = makeFakeModel(fake, dark: dark)
     let content = BatteryShot(model: model, dark: dark)
         .environment(\.colorScheme, dark ? .dark : .light)
     let renderer = ImageRenderer(content: content)
@@ -778,50 +1466,21 @@ private struct BatteryShot: View {
           let tiff = image.tiffRepresentation,
           let rep = NSBitmapImageRep(data: tiff),
           let png = rep.representation(using: .png, properties: [:]) else {
-        print("render failed")
+    print("render failed")
         return
     }
     try? png.write(to: URL(fileURLWithPath: path))
     print("rendered \(path) \(Int(image.size.width))x\(Int(image.size.height))")
 }
 
-@MainActor func makeFakeModel(_ fake: String) -> BatteryModel {
+@MainActor func makeFakeModel(_ fake: String, dark: Bool) -> BatteryModel {
     let model = BatteryModel()
-    model.name = "OPPO Enco Air5 Pro"
-    switch fake {
-    case "charging":
-        model.online = true
-        model.left = 82; model.right = 80; model.caseLevel = 96
-        model.leftCharging = false; model.rightCharging = true; model.caseCharging = true
-    case "empty":
-        model.online = true
-        model.left = 46; model.right = 45
-    case "offline":
-        model.online = false
-    default:
-        break
-    }
-    model.lastUpdate = Date()
+    applyFake(fake, to: model)
     return model
 }
 
 @MainActor func renderCard(to path: String, fake: String, dark: Bool) {
-    let model = BatteryModel()
-    model.name = "OPPO Enco Air5 Pro"
-    switch fake {
-    case "charging":
-        model.online = true
-        model.left = 82; model.right = 80; model.caseLevel = 96
-        model.leftCharging = false; model.rightCharging = true; model.caseCharging = true
-    case "empty":
-        model.online = true
-        model.left = 46; model.right = 45
-    case "offline":
-        model.online = false
-    default:
-        break
-    }
-    model.lastUpdate = Date()
+    let model = makeFakeModel(fake, dark: dark)
     let content = BatteryPopover(model: model)
         .environment(\.colorScheme, dark ? .dark : .light)
         .background(Color.clear)
@@ -840,7 +1499,7 @@ private struct BatteryShot: View {
 
 if let output = ProcessInfo.processInfo.environment["EB_SHOT"] {
     let dark = ProcessInfo.processInfo.environment["EB_APPEARANCE"] == "dark"
-    let fake = ProcessInfo.processInfo.environment["EB_FAKE"] ?? "charging"
+    let fake = ProcessInfo.processInfo.environment["EB_FAKE"] ?? "full"
     if #available(macOS 14.0, *) {
         MainActor.assumeIsolated { renderShot(to: output, fake: fake, dark: dark) }
     }
@@ -851,12 +1510,14 @@ if let output = ProcessInfo.processInfo.environment["EB_RENDER"] {
     if let appearance = ProcessInfo.processInfo.environment["EB_APPEARANCE"] {
         app.appearance = NSAppearance(named: appearance == "dark" ? .darkAqua : .aqua)
     }
-    let fake = ProcessInfo.processInfo.environment["EB_FAKE"] ?? "charging"
+    let fake = ProcessInfo.processInfo.environment["EB_FAKE"] ?? "full"
     if #available(macOS 14.0, *) {
         MainActor.assumeIsolated { renderCard(to: output, fake: fake, dark: ProcessInfo.processInfo.environment["EB_APPEARANCE"] == "dark") }
     }
     exit(0)
 }
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()

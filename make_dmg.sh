@@ -15,7 +15,8 @@ cp -R EncoBattery.app "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 
 cat > "$STAGE/安装说明.txt" <<'TXT'
-EncoBattery —— 在菜单栏显示 OPPO Enco Air5 Pro 的左右耳和充电仓电量
+EncoBattery —— 在菜单栏显示 OPPO Enco Air5 Pro 的左右耳和充电仓电量，
+还能切换降噪模式和音效、查看固件版本。
 
 安装
 1. 把左边的 EncoBattery 拖到右边的 Applications（应用程序）文件夹。
@@ -24,7 +25,12 @@ EncoBattery —— 在菜单栏显示 OPPO Enco Air5 Pro 的左右耳和充电�
    然后打开「系统设置 → 隐私与安全性」，页面下方找到 EncoBattery，点「仍要打开」→ 输入密码。
    （macOS 14 及更早版本也可以直接在 Finder 里右键点 EncoBattery →「打开」→ 再点「打开」。）
 3. 打开后 Dock 里没有图标，电量显示在屏幕右上角菜单栏（耳机图标 + 百分比）。
-   左键点它看左右耳和充电仓，右键可以刷新、退出。
+   左键点它：看左右耳和充电仓电量、切换降噪（降噪/关闭/通透 + 强度）和音效、看固件版本。
+   右键点它：刷新、重连耳机、退出。
+
+降噪小贴士
+· 降噪模式需要耳机在佩戴状态才能切换；耳机在充电盒里时耳机会拒绝切换（提示未确认）。
+· 当前降噪模式由耳机主动回报，第一次切换或用手机切换后才会显示。
 
 前提
 · macOS 13 或更新（Intel 和 Apple Silicon 都支持）。
