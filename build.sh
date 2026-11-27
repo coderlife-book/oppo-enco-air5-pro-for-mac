@@ -6,15 +6,16 @@ cd "$(dirname "$0")"
 
 APP="EncoBattery.app"
 VERSION="2.1.0"
-BUILD="4"
+BUILD="5"
 ARCHS=(arm64 x86_64)
+SOURCES=(Sources/*.swift)
 
 mkdir -p build
 for arch in "${ARCHS[@]}"; do
     swiftc -O -swift-version 5 \
         -target "${arch}-apple-macosx13.0" \
         -framework Cocoa -framework IOBluetooth \
-        -o "build/EncoBattery-${arch}" EncoBattery.swift
+        -o "build/EncoBattery-${arch}" "${SOURCES[@]}"
 done
 lipo -create -output build/EncoBattery "${ARCHS[@]/#/build/EncoBattery-}"
 
@@ -30,8 +31,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>            <string>EncoBattery</string>
-    <key>CFBundleDisplayName</key>     <string>耳机电量</string>
+    <key>CFBundleName</key>            <string>OPPO Enco Air5 Pro</string>
+    <key>CFBundleDisplayName</key>     <string>OPPO Enco Air5 Pro for Mac</string>
     <key>CFBundleExecutable</key>      <string>EncoBattery</string>
     <key>CFBundleIdentifier</key>      <string>local.encobattery</string>
     <key>CFBundleIconFile</key>        <string>EncoBattery</string>
@@ -47,5 +48,5 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 # 本地 ad-hoc 签名（没有开发者证书也能跑；对方首次打开需在「隐私与安全性」里放行）
-codesign --force --sign - "$APP" >/dev/null 2>&1 || true
+codesign --force --sign - "$APP"
 echo "built $APP ($(lipo -archs "$APP/Contents/MacOS/EncoBattery")) — 运行: open $APP"

@@ -4,10 +4,9 @@
 
 ## 现状
 
-- 代码全部在 `EncoBattery.swift`（单文件，约 2000 行），版本 **2.1.0**（`build.sh` 里 `VERSION=2.1.0 BUILD=4`），已提交推送，HEAD = `08571ba`。
-- 本机 `/Applications/EncoBattery.app` 是 build 4，正在运行。
-- 仓库：https://github.com/coderlife-book/oppo-enco-battery ，远端 main。
-- **GitHub 最新 release 仍是 v2.0.0。2.1.0 代码完成但未发布，等用户验收 UI。**
+- 源码按职责放在 `Sources/`，版本 **2.1.0**（`build.sh` 里 `VERSION=2.1.0 BUILD=5`）。
+- 仓库 https://github.com/coderlife-book/oppo-enco-air5-pro-for-mac ，默认分支 `main`。
+- 应用包名和 bundle ID 继续使用 `EncoBattery.app` / `local.encobattery`，便于覆盖升级。
 
 ## 2.1.0 相对 2.0.0 的变化
 
@@ -17,17 +16,17 @@
 - 展开/收起动画 200ms：手动逐帧 reveal 驱动，窗口与内容同步（NSPopover 尺寸没有原生动画，实测单帧瞬跳）。
 - 充电误报修复：`sideInCase` 放置门禁（0402 placement 04=盒内、05=盒外），盒外时充电标记强制清 false。
 
-## 下一步（按序）
+## 发布
 
-1. **等用户真鼠标点测**：分段按钮是否可点、展开/收起动画是否顺眼。通过才发版；点不动再查（先看是不是旧构建残留）。
-2. 发版：`./build.sh && ./make_dmg.sh` 出 `dist/EncoBattery-2.1.0.dmg`，重渲染 README 截图（钩子见下），`gh release create v2.1.0`——标题正文中文优先，英文附后。
-3. 功能候选（**用户没挑之前不要做**）：开机自启（SMAppService）、低电量通知、游戏低延迟（协议 0x0d01 查询 / 0x0304 写，必须先 `EB_TEST` 实机抓包验证）、全局快捷键、检查更新。
+运行 `./make_dmg.sh`，产物位于 `dist/`。用 `codesign --verify --strict` 校验应用包，挂载 DMG 校验内容，再上传到 GitHub Releases。
+
+演示环境变量只加到渲染命令上。不要用 `launchctl setenv EB_FAKE`，否则从 Finder 打开的应用也会进入演示模式，声音设置不会写入耳机。
 
 ## 调试钩子（环境变量）
 
 | 变量 | 作用 |
 |---|---|
-| `EB_FAKE=full\|charging\|empty\|anc\|smart\|eq\|offline` | 演示数据，不碰蓝牙 |
+| `EB_FAKE=full\|charging\|empty\|anc\|smart\|eq\|offline` | 演示数据，声音设置不会写入耳机 |
 | `EB_DEBUG=1` | 协议日志（tx/rx/raw-rx 十六进制） |
 | `EB_RENDER` / `EB_RENDER_SETTINGS` / `EB_SHOT` | 离屏渲染卡片/设置页/带菜单栏整图 |
 | `EB_APPEARANCE=light\|dark` | 配合渲染钩子出深浅色截图 |
@@ -50,10 +49,16 @@
 
 | 文件 | 内容 |
 |---|---|
-| `EncoBattery.swift` | 全部逻辑：帧编解码/协议 → EncoLink 会话 → BatteryModel → SwiftUI UI → AppDelegate |
+| `Sources/main.swift` | 应用入口，先处理离屏渲染，再启动 AppKit |
+| `Sources/EncoProtocol.swift` | 帧编解码、状态块解析和降噪/音效取值 |
+| `Sources/EncoLink.swift` | RFCOMM 连接、命令队列、设备回报和会话快照 |
+| `Sources/BatteryModel.swift` | SwiftUI 观察的电量、声音设置和连接状态 |
+| `Sources/AppDelegate.swift` | 菜单栏、浮层和设置窗口的生命周期，连接会话与界面 |
+| `Sources/BatteryPopover.swift` / `Sources/Settings.swift` | 菜单栏浮层、设置页与偏好持久化 |
+| `Sources/DeveloperTools.swift` / `Sources/DebugLog.swift` | 演示数据、离屏渲染与调试日志 |
 | `build.sh` | 通用二进制构建，`VERSION`/`BUILD` 在这里改 |
 | `make_dmg.sh` | DMG + 安装说明（安装说明.txt 也在这维护） |
 | `DESIGN.md` | UI 设计规范 + 本项目落地要点，**改 UI 前必读** |
 | `AGENTS.md` | 开发约定（新会话在这个目录会自动加载） |
-| `README.md` | 用户文档（功能、协议原理、FAQ、环境变量表） |
+| `README.md` | 功能、截图、安装与构建 |
 | `assets/` | README 截图；`dist/` DMG 产物；`gen_icon.py` 图标生成 |

@@ -1,6 +1,6 @@
-# EncoBattery 开发约定
+# OPPO Enco Air5 Pro for Mac 开发约定
 
-OPPO Enco Air5 Pro 的 macOS 菜单栏助手。单文件 SwiftUI + AppKit（`EncoBattery.swift`），`build.sh` 出通用二进制。
+OPPO Enco Air5 Pro 的 macOS 菜单栏助手。使用 SwiftUI + AppKit，源码位于 `Sources/`，`build.sh` 出通用二进制。
 
 ## UI 规范
 
