@@ -604,6 +604,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 guard let self else { return }
                 self.fakeActive = true
+                self.model.name = "OPPO Enco Air5 Pro"
                 switch fake {
                 case "charging":
                     self.model.online = true
