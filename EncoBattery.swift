@@ -446,6 +446,7 @@ private struct SegmentedRow<Value: Hashable>: View {
 private struct BatteryPopover: View {
     @ObservedObject var model: BatteryModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var soundExpanded = ProcessInfo.processInfo.environment["EB_EXPAND"] == "1"
     var onSetNoise: ((NoiseMode, ANCLevel?) -> Void)? = nil
     var onSetEQ: ((EQPreset) -> Void)? = nil
     var onOpenSettings: (() -> Void)? = nil
@@ -468,9 +469,7 @@ private struct BatteryPopover: View {
                 LevelRow(badge: "仓", title: "充电仓", level: model.caseLevel, charging: model.caseCharging)
             }
             Divider()
-            noiseSection
-            Divider()
-            eqSection
+            soundSection
             Divider()
             statusRow
             if let error = model.lastError {
@@ -509,6 +508,71 @@ private struct BatteryPopover: View {
                 .foregroundStyle(model.online ? Color.primary : Color.secondary)
                 .accessibilityLabel("整体电量 \(model.online ? model.percentage : "未知")")
         }
+    }
+
+    /// 「声音设置」入口行：默认折叠只显示摘要，点击展开详细控制。
+    private var soundSection: some View {
+        VStack(spacing: 10) {
+            Button {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) {
+                    soundExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "waveform")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("声音设置")
+                            .font(.subheadline)
+                        Text(soundSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    if model.pendingNoise || model.pendingEQ {
+                        ProgressView().controlSize(.mini)
+                    }
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(soundExpanded ? 90 : 0))
+                        .accessibilityHidden(true)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("声音设置，\(soundSummary)")
+            .accessibilityAddTraits(soundExpanded ? [] : .isButton)
+            .accessibilityHint(soundExpanded ? "折叠" : "展开")
+
+            if soundExpanded {
+                VStack(spacing: 10) {
+                    noiseSection
+                    eqSection
+                }
+                .transition(.opacity)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: soundExpanded)
+    }
+
+    private var soundSummary: String {
+        let noise: String
+        switch model.noiseMode {
+        case .noise:
+            noise = "降噪" + (model.noiseLevel.map { "·\($0.label)" } ?? "")
+        case .some(let mode):
+            noise = mode.label
+        case .none:
+            noise = "未知"
+        }
+        return "\(noise) · \(model.eq.map { $0.label } ?? "未知")"
     }
 
     private var noiseSection: some View {
