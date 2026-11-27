@@ -31,6 +31,7 @@
 // 编译：./build.sh
 
 import Cocoa
+import Combine
 import IOBluetooth
 import SwiftUI
 
@@ -310,6 +311,28 @@ final class BatteryModel: ObservableObject {
     }
 }
 
+// MARK: - 设置（持久化到 UserDefaults）
+
+final class SettingsStore: ObservableObject {
+    /// 菜单栏图标开关；关掉后图标从菜单栏消失，从 Dock 点图标能回到设置
+    @Published var menuBarIconVisible: Bool {
+        didSet { UserDefaults.standard.set(menuBarIconVisible, forKey: Self.kMenuBarIconVisible) }
+    }
+    /// 菜单栏分耳显示：左82 右80 仓96；没有数据的仓不占位置
+    @Published var menuBarDetailed: Bool {
+        didSet { UserDefaults.standard.set(menuBarDetailed, forKey: Self.kMenuBarDetailed) }
+    }
+
+    private static let kMenuBarIconVisible = "EBMenuBarIconVisible"
+    private static let kMenuBarDetailed = "EBMenuBarDetailed"
+
+    init() {
+        let d = UserDefaults.standard
+        menuBarIconVisible = d.object(forKey: Self.kMenuBarIconVisible) as? Bool ?? true
+        menuBarDetailed = d.object(forKey: Self.kMenuBarDetailed) as? Bool ?? false
+    }
+}
+
 // MARK: - 电量行（v1 样式保留）
 
 private struct LevelRow: View {
@@ -411,6 +434,7 @@ private struct BatteryPopover: View {
     @ObservedObject var model: BatteryModel
     var onSetNoise: ((NoiseMode, ANCLevel?) -> Void)? = nil
     var onSetEQ: ((EQPreset) -> Void)? = nil
+    var onOpenSettings: (() -> Void)? = nil
 
     private static let relativeTime: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
@@ -528,12 +552,6 @@ private struct BatteryPopover: View {
                 Text(model.statusTitle)
                     .font(.subheadline)
                     .foregroundStyle(model.online ? Color.primary : Color.secondary)
-
-                Spacer(minLength: 8)
-
-                Text(firmwareText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             HStack {
                 Spacer(minLength: 0)
@@ -554,13 +572,101 @@ private struct BatteryPopover: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
+
+                Spacer(minLength: 0)
+
+                Button {
+                    onOpenSettings?()
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("设置")
+                .accessibilityLabel("设置")
             }
         }
     }
 
+}
+
+// MARK: - 设置页
+
+struct SettingsPage: View {
+    @ObservedObject var settings: SettingsStore
+    @ObservedObject var model: BatteryModel
+
+    private var versionText: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+        return version.isEmpty ? "EncoBattery" : "EncoBattery v\(version) (\(build))"
+    }
+
     private var firmwareText: String {
-        if let firmware = model.firmware { return "固件 \(firmware)" }
-        return model.online ? "读取固件中…" : ""
+        if let firmware = model.firmware { return firmware }
+        return model.online ? "正在读取…" : "连接耳机后显示"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "gearshape.fill")
+                    .foregroundStyle(.secondary)
+                Text("设置")
+                    .font(.headline)
+                Spacer()
+            }
+            .accessibilityElement(children: .combine)
+
+            Divider()
+
+            Toggle(isOn: $settings.menuBarIconVisible) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("在菜单栏显示图标")
+                    Text("关掉后可以从 Dock 里的 EncoBattery 图标回到这里")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
+
+            Toggle(isOn: $settings.menuBarDetailed) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("菜单栏分耳显示电量")
+                    Text("显示成「L82 R80 仓96」，没有数据的仓不占位置；绿色表示充电中")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(!settings.menuBarIconVisible)
+            .opacity(settings.menuBarIconVisible ? 1 : 0.45)
+
+            Divider()
+
+            HStack {
+                Text("固件版本")
+                    .font(.subheadline)
+                Spacer()
+                Text(firmwareText)
+                    .font(.subheadline)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+
+            HStack {
+                Spacer()
+                Text(versionText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .toggleStyle(.switch)
+        .padding(18)
+        .frame(width: 344)
     }
 }
 
@@ -1110,8 +1216,11 @@ final class EncoLink {
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let model = BatteryModel()
+    private let settings = SettingsStore()
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
+    private var settingsWindow: NSWindow?
+    private var cancellables = Set<AnyCancellable>()
     private var keyMonitor: Any?
     private var link: EncoLink?
     private var ticker: Timer?
@@ -1123,6 +1232,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshItem.target = self
         let reconnectItem = menu.addItem(withTitle: "重连耳机", action: #selector(reconnect), keyEquivalent: "")
         reconnectItem.target = self
+        let settingsItem = menu.addItem(withTitle: "设置…", action: #selector(openSettingsFromMenu), keyEquivalent: ",")
+        settingsItem.target = self
         menu.addItem(.separator())
         let quitItem = menu.addItem(withTitle: "退出 EncoBattery", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
@@ -1151,7 +1262,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let popoverView = BatteryPopover(
             model: model,
             onSetNoise: { [weak self] mode, level in self?.setNoise(mode, level) },
-            onSetEQ: { [weak self] preset in self?.setEQ(preset) })
+            onSetEQ: { [weak self] preset in self?.setEQ(preset) },
+            onOpenSettings: { [weak self] in self?.openSettingsWindow(fromPopover: true) })
         popover.contentViewController = NSHostingController(rootView: popoverView)
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.popover.isShown else { return event }
@@ -1256,6 +1368,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 exit(0)
             }
         }
+        settings.$menuBarIconVisible
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] visible in
+                self?.applyMenuBarVisibility(visible)
+            }
+            .store(in: &cancellables)
+        settings.$menuBarDetailed
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateStatusItem()
+            }
+            .store(in: &cancellables)
+        applyMenuBarVisibility(settings.menuBarIconVisible)
         debugLog("started")
     }
 
@@ -1282,6 +1409,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let firmware = model.firmware { tip += " · 固件 \(firmware)" }
         button.toolTip = tip
 
+        // 分耳模式：「L82 R80 仓96」，没有数据的槽不出现
+        if settings.menuBarDetailed {
+            let detailed = detailedAttributedTitle()
+            if detailed.length > 0 {
+                button.attributedTitle = detailed
+                return
+            }
+        }
+
         let color: NSColor = level <= 10 ? .systemRed : (level <= 20 ? .systemOrange : .labelColor)
         button.attributedTitle = NSAttributedString(
             string: "\(level)%",
@@ -1290,6 +1426,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .foregroundColor: color,
             ]
         )
+    }
+
+    /// 菜单栏分耳电量：「L82 R80 仓96」；绿色=充电中，橙/红=低电量
+    private func detailedAttributedTitle() -> NSAttributedString {
+        let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .medium)
+        let labelFont = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
+
+        func levelColor(_ level: Int, charging: Bool) -> NSColor {
+            if charging { return .systemGreen }
+            if level <= 10 { return .systemRed }
+            if level <= 20 { return .systemOrange }
+            return .labelColor
+        }
+
+        let slots: [(String, Int?, Bool)] = [
+            ("L", model.left, model.leftCharging),
+            ("R", model.right, model.rightCharging),
+            ("仓", model.caseLevel, model.caseCharging),
+        ]
+        let segments = slots.compactMap { slot -> (String, Int, Bool)? in
+            guard let level = slot.1 else { return nil }
+            return (slot.0, level, slot.2)
+        }
+        guard !segments.isEmpty else { return NSAttributedString() }
+
+        let result = NSMutableAttributedString()
+        for (index, segment) in segments.enumerated() {
+            if index > 0 {
+                result.append(NSAttributedString(string: "  ", attributes: [
+                    .font: numberFont,
+                    .foregroundColor: NSColor.labelColor,
+                ]))
+            }
+            result.append(NSAttributedString(string: segment.0, attributes: [
+                .font: labelFont,
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]))
+            result.append(NSAttributedString(string: "\(segment.1)%", attributes: [
+                .font: numberFont,
+                .foregroundColor: levelColor(segment.1, charging: segment.2),
+            ]))
+        }
+        return result
     }
 
     @objc private func statusItemClicked() {
@@ -1323,6 +1502,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.pendingNoise = true
         model.lastError = nil
         link?.send(.noise(mode, level))
+    }
+
+    // MARK: 设置窗口与菜单栏可见性
+
+    private func applyMenuBarVisibility(_ visible: Bool) {
+        statusItem.isVisible = visible
+        if visible {
+            NSApp.setActivationPolicy(.accessory)
+            updateStatusItem()
+        } else {
+            // 菜单栏没有图标时，把 Dock 图标顶出来当入口
+            NSApp.setActivationPolicy(.regular)
+        }
+    }
+
+    @objc private func openSettingsFromMenu() {
+        openSettingsWindow(fromPopover: false)
+    }
+
+    private func openSettingsWindow(fromPopover: Bool) {
+        if fromPopover { popover.performClose(nil) }
+        if let window = settingsWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsPage(settings: settings, model: model)))
+        window.title = "EncoBattery 设置"
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow = window
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // 从 Dock 点图标进来：菜单栏图标被关掉时的入口
+        if !flag { openSettingsWindow(fromPopover: false) }
+        return true
     }
 
     private func setEQ(_ preset: EQPreset) {
@@ -1497,6 +1716,25 @@ private struct BatteryShot: View {
     print("rendered \(path) \(Int(image.size.width))x\(Int(image.size.height))")
 }
 
+@MainActor func renderSettings(to path: String, dark: Bool) {
+    let model = BatteryModel()
+    applyFake("full", to: model)
+    let content = SettingsPage(settings: SettingsStore(), model: model)
+        .environment(\.colorScheme, dark ? .dark : .light)
+        .background(Color.clear)
+    let renderer = ImageRenderer(content: content)
+    renderer.scale = 2
+    guard let image = renderer.nsImage,
+          let tiff = image.tiffRepresentation,
+          let rep = NSBitmapImageRep(data: tiff),
+          let png = rep.representation(using: .png, properties: [:]) else {
+        print("render failed")
+        return
+    }
+    try? png.write(to: URL(fileURLWithPath: path))
+    print("rendered \(path) \(Int(image.size.width))x\(Int(image.size.height))")
+}
+
 if let output = ProcessInfo.processInfo.environment["EB_SHOT"] {
     let dark = ProcessInfo.processInfo.environment["EB_APPEARANCE"] == "dark"
     let fake = ProcessInfo.processInfo.environment["EB_FAKE"] ?? "full"
@@ -1513,6 +1751,16 @@ if let output = ProcessInfo.processInfo.environment["EB_RENDER"] {
     let fake = ProcessInfo.processInfo.environment["EB_FAKE"] ?? "full"
     if #available(macOS 14.0, *) {
         MainActor.assumeIsolated { renderCard(to: output, fake: fake, dark: ProcessInfo.processInfo.environment["EB_APPEARANCE"] == "dark") }
+    }
+    exit(0)
+}
+
+if let output = ProcessInfo.processInfo.environment["EB_RENDER_SETTINGS"] {
+    if let appearance = ProcessInfo.processInfo.environment["EB_APPEARANCE"] {
+        app.appearance = NSAppearance(named: appearance == "dark" ? .darkAqua : .aqua)
+    }
+    if #available(macOS 14.0, *) {
+        MainActor.assumeIsolated { renderSettings(to: output, dark: ProcessInfo.processInfo.environment["EB_APPEARANCE"] == "dark") }
     }
     exit(0)
 }
