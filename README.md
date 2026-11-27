@@ -9,18 +9,16 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/coderlife-book/oppo-enco-battery?color=orange)](https://github.com/coderlife-book/oppo-enco-battery/releases/latest)
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="screenshots/charging-night.png">
-  <img src="screenshots/charging.png" width="640" alt="EncoBattery 弹窗：菜单栏图标 + 左右耳 + 充电仓电量">
-</picture>
+<img src="assets/charging-light.png" width="640" alt="EncoBattery 弹窗：菜单栏图标 + 左右耳 + 充电仓电量">
 
 ## 截图
 
 下面是真实运行时的桌面截图（耳机放在充电仓里，左右耳和仓都在充电）。
 
-| 耳机在仓里：左右耳 + 仓都在充电 | 耳机戴在耳朵上：只有左右耳 |
-| --- | --- |
-| <picture><source media="(prefers-color-scheme: dark)" srcset="screenshots/charging-night.png"><img src="screenshots/charging.png" width="330" alt="充电中"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="screenshots/buds-night.png"><img src="screenshots/buds-only.png" width="330" alt="只有左右耳"></picture> |
+|  | 浅色模式 | 深色模式 |
+| --- | --- | --- |
+| 耳机在仓里：左右耳 + 仓都在充电 | ![浅色](assets/charging-light.png) | ![深色](assets/charging-dark.png) |
+| 耳机戴在耳朵上：只有左右耳 | ![浅色](assets/buds-only-light.png) | ![深色](assets/buds-only-dark.png) |
 
 左键点菜单栏图标弹出卡片，右键是「刷新电量 / 退出 EncoBattery」。菜单栏只显示一个数字（取左右耳里较低的那只），低于 20% 变橙、低于 10% 变红；耳机没连接时图标置灰、不显示数字。
 

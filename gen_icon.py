@@ -131,7 +131,7 @@ def main() -> None:
         ["iconutil", "-c", "icns", str(iconset), "-o", str(HERE / "EncoBattery.icns")],
         check=True,
     )
-    master.resize((512, 512), Image.LANCZOS).save(HERE / "screenshots" / "icon.png")
+    master.resize((512, 512), Image.LANCZOS).save(HERE / "assets" / "icon.png")
     print("wrote EncoBattery.icns")
 
 
