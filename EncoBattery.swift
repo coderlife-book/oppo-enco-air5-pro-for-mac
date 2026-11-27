@@ -441,7 +441,7 @@ private struct SegmentedRow<Value: Hashable>: View {
         )
         .opacity(disabled ? 0.45 : 1)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: selection)
-        .accessibilityElement(children: .ignore)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(label)
         .accessibilityValue(selection.flatMap { selected in
             options.first { $0.value == selected }?.label
@@ -451,6 +451,7 @@ private struct SegmentedRow<Value: Hashable>: View {
     @ViewBuilder private func segment(_ option: (value: Value, label: String)) -> some View {
         let selected = selection == option.value
         Button {
+            debugLog("segment-tap \(label)/\(option.label) disabled=\(disabled)")
             guard !disabled else { return }
             action(option.value)
         } label: {
@@ -480,6 +481,10 @@ private struct BatteryPopover: View {
     @ObservedObject var model: BatteryModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var soundExpanded = ProcessInfo.processInfo.environment["EB_EXPAND"] == "1"
+    @State private var soundVisible = ProcessInfo.processInfo.environment["EB_EXPAND"] == "1"
+    @State private var revealProgress: CGFloat = ProcessInfo.processInfo.environment["EB_EXPAND"] == "1" ? 1 : 0
+    @State private var detailsHeight: CGFloat = 66
+    @State private var revealTimer: Timer?
     var onSetNoise: ((NoiseMode, ANCLevel?) -> Void)? = nil
     var onSetEQ: ((EQPreset) -> Void)? = nil
     var onOpenSettings: (() -> Void)? = nil
@@ -515,6 +520,18 @@ private struct BatteryPopover: View {
         .padding(16)
         .frame(width: 336)
         .fixedSize(horizontal: false, vertical: true)
+        .onAppear {
+            if let delay = Double(ProcessInfo.processInfo.environment["EB_EXPAND_AFTER"] ?? "") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    toggleSound()
+                }
+            }
+            if let delay = Double(ProcessInfo.processInfo.environment["EB_COLLAPSE_AFTER"] ?? "") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    if soundExpanded { toggleSound() }
+                }
+            }
+        }
     }
 
     private var header: some View {
@@ -543,13 +560,39 @@ private struct BatteryPopover: View {
         }
     }
 
+    /// 展开/收起声音设置。NSPopover 的窗口尺寸没有原生动画（实测单帧瞬跳），
+    /// 所以这里手动逐帧驱动容器高度：SwiftUI 每帧重排 → 宿主视图 fittingSize
+    /// 逐帧变化 → popover 窗口逐帧跟随，窗口和内容才动得同步。
+    private func toggleSound() {
+        let expanding = !soundExpanded
+        soundExpanded = expanding
+        revealTimer?.invalidate()
+        if reduceMotion {
+            revealProgress = expanding ? 1 : 0
+            soundVisible = expanding
+            return
+        }
+        if expanding { soundVisible = true }
+        let from = revealProgress
+        let to: CGFloat = expanding ? 1 : 0
+        let start = Date()
+        revealTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { timer in
+            let x = min(Date().timeIntervalSince(start) / 0.2, 1)
+            let eased = x < 0.5 ? 2 * x * x : 1 - pow(-2 * x + 2, 2) / 2
+            revealProgress = from + (to - from) * CGFloat(eased)
+            if x >= 1 {
+                timer.invalidate()
+                revealProgress = to
+                if !expanding { soundVisible = false }
+            }
+        }
+    }
+
     /// 「声音设置」入口行：默认折叠只显示摘要，点击展开详细控制。
     private var soundSection: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 0) {
             Button {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                    soundExpanded.toggle()
-                }
+                toggleSound()
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "waveform")
@@ -575,7 +618,7 @@ private struct BatteryPopover: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(soundExpanded ? 90 : 0))
+                        .rotationEffect(.degrees(revealProgress * 90))
                         .accessibilityHidden(true)
                 }
                 .contentShape(Rectangle())
@@ -584,13 +627,22 @@ private struct BatteryPopover: View {
             .accessibilityLabel("声音设置，\(soundSummary)")
             .accessibilityHint(soundExpanded ? "折叠" : "展开")
 
-            if soundExpanded {
-                VStack(spacing: 10) {
-                    noiseSection
-                    eqSection
+            ZStack(alignment: .top) {
+                if soundVisible {
+                    VStack(spacing: 10) {
+                        noiseSection
+                        eqSection
+                    }
+                    .background(GeometryReader { geo in
+                        Color.clear
+                            .onAppear { detailsHeight = geo.size.height }
+                            .onChange(of: geo.size.height) { detailsHeight = $0 }
+                    })
+                    .padding(.top, 10)
                 }
-                .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
             }
+            .frame(height: revealProgress * (detailsHeight + 10))
+            .clipped()
         }
     }
 
@@ -1369,6 +1421,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
 
+        if ProcessInfo.processInfo.environment["EB_POPOVER_TEST"] == "1" {
+            let expandDelay = Double(ProcessInfo.processInfo.environment["EB_EXPAND_AFTER"] ?? "") ?? 2
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self else { return }
+                self.togglePopover()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    guard let self, let w = self.popover.contentViewController?.view.window else { exit(1) }
+                    // 逐帧采样窗口高度（覆盖 EB_EXPAND_AFTER 展开 + EB_COLLAPSE_AFTER 收起）
+                    var samples: [String] = []
+                    let start = Date()
+                    let timer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { _ in
+                        samples.append(String(format: "%.2f:%.0f", Date().timeIntervalSince(start), w.frame.size.height))
+                    }
+                    let settle = max(expandDelay, Double(ProcessInfo.processInfo.environment["EB_COLLAPSE_AFTER"] ?? "") ?? 0)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + settle + 0.5) {
+                        timer.invalidate()
+                        debugLog("samples " + samples.joined(separator: " "))
+                        exit(0)
+                    }
+                }
+            }
+        }
+
         let interval = Double(ProcessInfo.processInfo.environment["EB_INTERVAL"] ?? "") ?? 15
         let link = EncoLink(keepaliveInterval: interval)
         link.onUpdate = { [weak self] snapshot in
@@ -1591,7 +1666,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setNoise(_ mode: NoiseMode, _ level: ANCLevel?) {
-        guard !fakeActive, model.online else { return }
+        guard !fakeActive else { return }
+        guard model.online else {
+            model.lastError = "耳机未连接"
+            return
+        }
         model.pendingNoise = true
         model.lastError = nil
         link?.send(.noise(mode, level))
@@ -1638,7 +1717,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setEQ(_ preset: EQPreset) {
-        guard !fakeActive, model.online else { return }
+        guard !fakeActive else { return }
+        guard model.online else {
+            model.lastError = "耳机未连接"
+            return
+        }
         model.pendingEQ = true
         model.lastError = nil
         link?.send(.eq(preset))

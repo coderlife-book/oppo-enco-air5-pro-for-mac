@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 
 APP="EncoBattery.app"
 VERSION="2.1.0"
-BUILD="3"
+BUILD="4"
 ARCHS=(arm64 x86_64)
 
 mkdir -p build
