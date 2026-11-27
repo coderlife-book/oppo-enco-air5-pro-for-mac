@@ -6,10 +6,28 @@
 
 ## 截图
 
-| 外观 | 电量概览 | 声音设置 | 设置窗口 |
-| --- | :---: | :---: | :---: |
-| 浅色 | ![浅色电量概览](assets/battery-overview-light.png) | ![浅色声音设置](assets/sound-controls-light.png) | ![浅色设置窗口](assets/settings-window-light.png) |
-| 深色 | ![深色电量概览](assets/battery-overview-dark.png) | ![深色声音设置](assets/sound-controls-dark.png) | ![深色设置窗口](assets/settings-window-dark.png) |
+每组左侧为浅色，右侧为深色。点击图片查看原图。
+
+### 电量概览
+
+<p align="center">
+  <a href="assets/battery-overview-light.png"><img src="assets/battery-overview-light.png" width="48%" alt="浅色电量概览"></a>
+  <a href="assets/battery-overview-dark.png"><img src="assets/battery-overview-dark.png" width="48%" alt="深色电量概览"></a>
+</p>
+
+### 声音设置
+
+<p align="center">
+  <a href="assets/sound-controls-light.png"><img src="assets/sound-controls-light.png" width="48%" alt="浅色声音设置"></a>
+  <a href="assets/sound-controls-dark.png"><img src="assets/sound-controls-dark.png" width="48%" alt="深色声音设置"></a>
+</p>
+
+### 设置窗口
+
+<p align="center">
+  <a href="assets/settings-window-light.png"><img src="assets/settings-window-light.png" width="48%" alt="浅色设置窗口"></a>
+  <a href="assets/settings-window-dark.png"><img src="assets/settings-window-dark.png" width="48%" alt="深色设置窗口"></a>
+</p>
 
 ## 安装
 
