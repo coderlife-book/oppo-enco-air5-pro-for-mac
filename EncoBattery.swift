@@ -678,6 +678,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             NSApp.activate(ignoringOtherApps: true)
             content.window?.makeKeyAndOrderFront(nil)
+            // EB_APPEARANCE 只用于截图：NSPopover 自己的窗口不会跟着 NSApp.appearance 走，得单独指定
+            if let name = ProcessInfo.processInfo.environment["EB_APPEARANCE"] {
+                content.window?.appearance = NSAppearance(named: name == "dark" ? .darkAqua : .aqua)
+            }
             if ProcessInfo.processInfo.environment["EB_DEBUG"] != nil {
                 print("after show: isShown=\(popover.isShown) vis=\(popover.contentViewController?.view.window?.isVisible ?? false) occl=\(popover.contentViewController?.view.window?.occlusionState.rawValue ?? 0) win=\(popover.contentViewController?.view.window?.frame ?? .zero) screens=\(NSScreen.screens.map { $0.frame }) buttonWin=\(button.window?.frame ?? .zero)")
                 fflush(stdout)
